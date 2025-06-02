@@ -4,18 +4,20 @@ import {
   createTranscript, 
   createTranscriptSegments,
   createVideoChunk,
-  createEmbedding,
-  getTranscriptTextForChunk
+  getTranscriptTextForChunk,
+  VideoRecord
 } from '@/lib/supabase/database'
+import { supabaseAdmin } from '@/lib/supabase/admin'
 import { getVideoTranscript } from './youtube'
 import { generateTopicBasedChunksWithBatching, analyzeVideoContent } from '@/lib/ai/gemini'
-import { generateChunkEmbeddings } from '@/lib/ai/embeddings'
+import { generateChunkEmbeddings, generateTextEmbedding, generateMultimodalEmbedding } from '@/lib/ai/embeddings'
 import { TranscriptionFactory } from '@/lib/transcription/factory'
 import { GeminiProvider, GeminiChunk } from '@/lib/transcription/providers/gemini'
 import { extractAudioFromVideo, checkFFmpegAvailability, cleanupAudioFile } from './audio-extraction'
 import { TranscriptSegment as TranscriptionSegment } from '@/lib/transcription/types'
 
 const CHUNK_DURATION_SECONDS = parseInt(process.env.CHUNK_DURATION_SECONDS || '60')
+const EMBEDDING_BATCH_SIZE = 100;
 
 export async function processUploadedVideo(videoId: string, audioFilePath?: string): Promise<void> {
   await updateVideoStatus(videoId, 'processing')
@@ -54,6 +56,12 @@ async function processWithUnifiedGemini(
   provider: GeminiProvider
 ): Promise<void> {
   try {
+    // Get video info for source information
+    const video = await getVideoById(videoId)
+    if (!video) {
+      throw new Error('Video not found')
+    }
+
     // Unified transcription and chunking
     await updateVideoStatus(videoId, 'transcribing')
     console.log(`Starting unified Gemini transcription and chunking`)
@@ -109,6 +117,7 @@ async function processWithUnifiedGemini(
         description: chunk.description,
         start_time_seconds: chunk.startTime,
         end_time_seconds: chunk.endTime,
+        transcript_text: chunk.transcript, // Include transcript in chunk
         topics: chunk.topics
       })
 
@@ -124,9 +133,9 @@ async function processWithUnifiedGemini(
       throw new Error('No chunks created successfully')
     }
 
-    // Generate embeddings
+    // Generate embeddings (both transcript and video)
     await updateVideoStatus(videoId, 'embedding')
-    await generateAndStoreEmbeddingsFromChunks(videoId, geminiChunks, chunkIds)
+    await generateAndStoreEmbeddingsFromChunks(videoId, video, geminiChunks, chunkIds, provider)
 
     // Mark as completed
     await updateVideoStatus(videoId, 'completed')
@@ -173,7 +182,10 @@ async function processWithTraditionalApproach(
 
     // Use existing pipeline for chunking and processing
     const video = await getVideoById(videoId)
-    await processTranscriptAndCreateChunks(videoId, processingSegments, video?.file_path || '')
+    if (!video) {
+      throw new Error('Video not found for traditional approach')
+    }
+    await processTranscriptAndCreateChunks(videoId, processingSegments, video.file_path || '', video)
     
   } catch (error) {
     console.error('Traditional transcription processing error:', error)
@@ -183,44 +195,106 @@ async function processWithTraditionalApproach(
 
 async function generateAndStoreEmbeddingsFromChunks(
   videoId: string,
+  video: VideoRecord,
   geminiChunks: GeminiChunk[],
-  chunkIds: string[]
+  chunkIds: string[],
+  provider?: GeminiProvider
 ): Promise<void> {
   try {
-    // Prepare chunks for embedding generation
-    const chunksForEmbedding = geminiChunks.map((chunk, index) => ({
-      id: chunkIds[index],
-      transcriptText: chunk.transcript,
-      visualDescription: '', // Would be generated from video analysis
-      topics: chunk.topics
-    }))
+    let allEmbeddingsToCreate: any[] = []; 
 
-    // Generate embeddings
-    const embeddingResults = await generateChunkEmbeddings(chunksForEmbedding)
+    const performBatchInsert = async (embeddingsToInsert: any[]) => {
+      if (embeddingsToInsert.length === 0) return;
+      console.log(`Attempting to batch insert ${embeddingsToInsert.length} embeddings into DB.`);
+      const { error: insertError } = await supabaseAdmin.from('embeddings').insert(embeddingsToInsert);
+      if (insertError) {
+        console.error('Batch DB embedding insert error:', insertError);
+      } else {
+        console.log(`Successfully batch inserted ${embeddingsToInsert.length} embeddings into DB.`);
+      }
+    };
 
-    // Store embeddings in database
-    for (const result of embeddingResults) {
-      if (result.error || result.embedding.length === 0) {
-        console.error(`Embedding error for chunk ${result.chunkId}: ${result.error}`)
-        continue
+    if (provider) {
+      console.log(`Generating multimodal embeddings for ${geminiChunks.length} chunks (Upload Flow)`)
+      const getFrameCount = (durationSeconds: number): number => {
+        const baseFrames = 1; const additionalFrames = Math.floor(durationSeconds / 30);
+        return Math.min(baseFrames + additionalFrames, 5);
       }
 
-      const success = await createEmbedding({
-        video_id: videoId,
-        chunk_id: result.chunkId,
-        content_type: result.contentType,
-        content_text: chunksForEmbedding.find(c => c.id === result.chunkId)?.transcriptText || '',
-        embedding: result.embedding
-      })
+      for (let i = 0; i < geminiChunks.length; i++) {
+        const chunk = geminiChunks[i]; const chunkId = chunkIds[i];
+        if (!chunkId) continue;
+        console.time(`Chunk ${chunkId} embedding`);
+        try {
+          const transcriptEmbedding = await generateTextEmbedding(chunk.transcript);
+          if (!transcriptEmbedding.error && transcriptEmbedding.embedding.length > 0) {
+            allEmbeddingsToCreate.push({
+              video_id: videoId, chunk_id: chunkId, content_type: 'transcript',
+              content_text: chunk.transcript, embedding: transcriptEmbedding.embedding
+            });
+          }
 
-      if (!success) {
-        console.error(`Failed to store embedding for chunk ${result.chunkId}`)
+          const chunkDuration = chunk.endTime - chunk.startTime;
+          const frameCount = getFrameCount(chunkDuration);
+          const videoSource = video.source_type === 'youtube' 
+            ? { type: 'youtube' as const, url: video.source_url }
+            : { type: 'upload' as const, path: video.file_path };
+
+          if (videoSource.url || videoSource.path) {
+            const videoEmbeddingResult = await provider.generateVideoEmbedding({
+              source: videoSource, startTime: chunk.startTime, endTime: chunk.endTime, frameCount
+            });
+            allEmbeddingsToCreate.push({
+              video_id: videoId, chunk_id: chunkId, content_type: 'visual',
+              content_text: videoEmbeddingResult.description, embedding: videoEmbeddingResult.embedding,
+              metadata: { confidence: videoEmbeddingResult.confidence, frameCount, chunkDuration }
+            });
+
+            const multimodalEmbedding = await generateMultimodalEmbedding(
+              chunk.transcript, videoEmbeddingResult.description, chunk.topics
+            );
+            if (!multimodalEmbedding.error && multimodalEmbedding.embedding.length > 0) {
+              allEmbeddingsToCreate.push({
+                video_id: videoId, chunk_id: chunkId, content_type: 'multimodal',
+                content_text: `Transcript: ${chunk.transcript}\n\nVisual: ${videoEmbeddingResult.description}`,
+                embedding: multimodalEmbedding.embedding,
+                metadata: { topics: chunk.topics, confidence: videoEmbeddingResult.confidence }
+              });
+            }
+          } else {
+            console.warn(`Skipping video embedding for chunk ${chunkId}: No valid video source`);
+          }
+          await new Promise(resolve => setTimeout(resolve, 200));
+          if (allEmbeddingsToCreate.length >= EMBEDDING_BATCH_SIZE) {
+            await performBatchInsert(allEmbeddingsToCreate); allEmbeddingsToCreate = [];
+          }
+        } catch (error) {
+          console.error(`Error processing embeddings for chunk ${chunkId}:`, error);
+        } finally {
+          console.timeEnd(`Chunk ${chunkId} embedding`);
+        }
+      }
+    } else {
+      const chunksForEmbedding = geminiChunks.map((chunk, index) => ({
+        id: chunkIds[index], transcriptText: chunk.transcript,
+        visualDescription: '', topics: chunk.topics
+      }));
+      const embeddingResults = await generateChunkEmbeddings(chunksForEmbedding);
+      for (const result of embeddingResults) {
+        if (result.error || result.embedding.length === 0) { continue; }
+        allEmbeddingsToCreate.push({
+          video_id: videoId, chunk_id: result.chunkId, content_type: result.contentType,
+          content_text: chunksForEmbedding.find(c => c.id === result.chunkId)?.transcriptText || '',
+          embedding: result.embedding
+        });
+        if (allEmbeddingsToCreate.length >= EMBEDDING_BATCH_SIZE) {
+          await performBatchInsert(allEmbeddingsToCreate); allEmbeddingsToCreate = [];
+        }
       }
     }
-
+    await performBatchInsert(allEmbeddingsToCreate);
   } catch (error) {
-    console.error('Embedding generation error:', error)
-    throw error
+    console.error('Overall embedding generation error (Upload Flow):', error);
   }
 }
 
@@ -241,7 +315,7 @@ export async function processYouTubeVideo(videoId: string, youtubeId: string): P
       throw new Error('No transcript available for this video')
     }
 
-    await processTranscriptAndCreateChunks(videoId, transcriptSegments, video.source_url || '')
+    await processTranscriptAndCreateChunks(videoId, transcriptSegments, video.source_url || '', video)
     
   } catch (error) {
     console.error(`YouTube processing error for video ${videoId}:`, error)
@@ -252,7 +326,8 @@ export async function processYouTubeVideo(videoId: string, youtubeId: string): P
 async function processTranscriptAndCreateChunks(
   videoId: string, 
   transcriptSegments: Array<{ text: string; start: number; duration: number; end: number }>,
-  videoUrl: string
+  videoUrl: string,
+  video: VideoRecord
 ): Promise<void> {
   try {
     console.log(`Processing ${transcriptSegments.length} transcript segments for video ${videoId}`)
@@ -352,7 +427,7 @@ async function processTranscriptAndCreateChunks(
 
     // Generate embeddings (reconstruct transcript text when needed)
     await updateVideoStatus(videoId, 'embedding')
-    await generateAndStoreEmbeddings(videoId, chunks, chunkIds)
+    await generateAndStoreEmbeddings(videoId, video, chunks, chunkIds)
 
     // Mark as completed
     await updateVideoStatus(videoId, 'completed')
@@ -412,6 +487,7 @@ function createSimpleTimeBasedChunks(
 
 async function generateAndStoreEmbeddings(
   videoId: string,
+  video: VideoRecord,
   chunks: Array<{
     title: string
     description: string
@@ -422,50 +498,105 @@ async function generateAndStoreEmbeddings(
   chunkIds: string[]
 ): Promise<void> {
   try {
-    // Prepare chunks for embedding generation (reconstruct transcript text)
+    let allEmbeddingsToCreate: any[] = [];
+
+    const performBatchInsert = async (embeddingsToInsert: any[]) => {
+      if (embeddingsToInsert.length === 0) return;
+      console.log(`Attempting to batch insert ${embeddingsToInsert.length} embeddings into DB (YouTube Flow).`);
+      const { error: insertError } = await supabaseAdmin.from('embeddings').insert(embeddingsToInsert);
+      if (insertError) {
+        console.error('Batch DB embedding insert error (YouTube Flow):', insertError);
+      } else {
+        console.log(`Successfully batch inserted ${embeddingsToInsert.length} embeddings into DB (YouTube Flow).`);
+      }
+    };
+
     const chunksForEmbedding = await Promise.all(
       chunks.map(async (chunk, index) => {
         const transcriptText = await getTranscriptTextForChunk(
-          videoId,
-          chunk.start_time_seconds,
-          chunk.end_time_seconds
-        )
-        
-        return {
-          id: chunkIds[index],
-          transcriptText,
-          visualDescription: '', // Would be generated from video analysis
-          topics: chunk.topics
+          videoId, chunk.start_time_seconds, chunk.end_time_seconds
+        );
+        return { id: chunkIds[index], transcriptText, visualDescription: '', topics: chunk.topics };
+      })
+    );
+
+    const canGenerateVideoEmbeddings = video.source_type === 'youtube' && video.source_url;
+    const provider = canGenerateVideoEmbeddings ? TranscriptionFactory.create() : null;
+
+    if (canGenerateVideoEmbeddings && provider instanceof GeminiProvider) {
+      console.log(`Generating multimodal embeddings for YouTube video: ${video.source_url}`);
+      const getFrameCount = (durationSeconds: number): number => {
+        const baseFrames = 1; const additionalFrames = Math.floor(durationSeconds / 30);
+        return Math.min(baseFrames + additionalFrames, 5);
+      };
+
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i]; const chunkId = chunkIds[i];
+        const chunkDataForEmbedding = chunksForEmbedding[i];
+        if (!chunkId || !chunkDataForEmbedding) continue;
+        console.time(`Chunk ${chunkId} embedding YT`);
+        try {
+          const transcriptEmbedding = await generateTextEmbedding(chunkDataForEmbedding.transcriptText);
+          if (!transcriptEmbedding.error && transcriptEmbedding.embedding.length > 0) {
+            allEmbeddingsToCreate.push({
+              video_id: videoId, chunk_id: chunkId, content_type: 'transcript',
+              content_text: chunkDataForEmbedding.transcriptText, embedding: transcriptEmbedding.embedding
+            });
+          }
+
+          const chunkDuration = chunk.end_time_seconds - chunk.start_time_seconds;
+          const frameCount = getFrameCount(chunkDuration);
+          const videoEmbeddingResult = await provider.generateVideoEmbedding({
+            source: { type: 'youtube', url: video.source_url! },
+            startTime: chunk.start_time_seconds, endTime: chunk.end_time_seconds, frameCount
+          });
+          allEmbeddingsToCreate.push({
+            video_id: videoId, chunk_id: chunkId, content_type: 'visual',
+            content_text: videoEmbeddingResult.description, embedding: videoEmbeddingResult.embedding,
+            metadata: { confidence: videoEmbeddingResult.confidence, frameCount, chunkDuration }
+          });
+
+          const multimodalEmbedding = await generateMultimodalEmbedding(
+            chunkDataForEmbedding.transcriptText, videoEmbeddingResult.description, chunk.topics
+          );
+          if (!multimodalEmbedding.error && multimodalEmbedding.embedding.length > 0) {
+            allEmbeddingsToCreate.push({
+              video_id: videoId, chunk_id: chunkId, content_type: 'multimodal',
+              content_text: `Transcript: ${chunkDataForEmbedding.transcriptText}\n\nVisual: ${videoEmbeddingResult.description}`,
+              embedding: multimodalEmbedding.embedding,
+              metadata: { topics: chunk.topics, confidence: videoEmbeddingResult.confidence }
+            });
+          }
+          await new Promise(resolve => setTimeout(resolve, 200));
+          if (allEmbeddingsToCreate.length >= EMBEDDING_BATCH_SIZE) {
+            await performBatchInsert(allEmbeddingsToCreate); allEmbeddingsToCreate = [];
+          }
+        } catch (error) {
+          console.error(`Error processing video embeddings for chunk ${chunkId} (YouTube Flow):`, error);
+        } finally {
+          console.timeEnd(`Chunk ${chunkId} embedding YT`);
         }
-      })
-    )
-
-    // Generate embeddings
-    const embeddingResults = await generateChunkEmbeddings(chunksForEmbedding)
-
-    // Store embeddings in database
-    for (const result of embeddingResults) {
-      if (result.error || result.embedding.length === 0) {
-        console.error(`Embedding error for chunk ${result.chunkId}: ${result.error}`)
-        continue
       }
-
-      const success = await createEmbedding({
-        video_id: videoId,
-        chunk_id: result.chunkId,
-        content_type: result.contentType,
-        content_text: chunksForEmbedding.find(c => c.id === result.chunkId)?.transcriptText || '',
-        embedding: result.embedding
-      })
-
-      if (!success) {
-        console.error(`Failed to store embedding for chunk ${result.chunkId}`)
+    } else {
+      // Fallback: Generate only transcript embeddings (original functionality)
+      const embeddingResults = await generateChunkEmbeddings(chunksForEmbedding);
+      for (const result of embeddingResults) {
+        if (result.error || result.embedding.length === 0) { continue; }
+        allEmbeddingsToCreate.push({
+          video_id: videoId, chunk_id: result.chunkId, content_type: result.contentType,
+          content_text: chunksForEmbedding.find(c => c.id === result.chunkId)?.transcriptText || '',
+          embedding: result.embedding
+        });
+        if (allEmbeddingsToCreate.length >= EMBEDDING_BATCH_SIZE) {
+          await performBatchInsert(allEmbeddingsToCreate); allEmbeddingsToCreate = [];
+        }
       }
     }
+    // Insert any remaining embeddings
+    await performBatchInsert(allEmbeddingsToCreate);
 
   } catch (error) {
-    console.error('Embedding generation error:', error)
-    throw error
+    console.error('Overall embedding generation error (YouTube Flow):', error);
   }
 }
 

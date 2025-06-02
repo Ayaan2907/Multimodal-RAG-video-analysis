@@ -18,6 +18,25 @@ export interface GeminiChunk {
   transcript: string
 }
 
+export interface VideoEmbeddingResult {
+  description: string
+  embedding: number[]
+  confidence: number
+}
+
+export interface VideoSource {
+  type: 'upload' | 'youtube'
+  path?: string  // For uploads: storage path
+  url?: string   // For YouTube: video URL
+}
+
+export interface VideoSegmentRequest {
+  source: VideoSource
+  startTime: number
+  endTime: number
+  frameCount?: number
+}
+
 export class GeminiProvider implements TranscriptionProvider {
   name = 'gemini'
   private model = google('gemini-2.0-flash-exp')
@@ -187,7 +206,7 @@ Audio URL: ${urlData.publicUrl}`
       const response = await generateText({
         model: this.model,
         prompt,
-        maxTokens: 8000,
+        maxTokens: 10000,
         temperature: 0.1
       })
       
@@ -213,6 +232,89 @@ Audio URL: ${urlData.publicUrl}`
           console.warn(`Failed to cleanup audio file ${audioFileName}:`, cleanupError)
         }
       }
+    }
+  }
+
+  // NEW: Generate video embeddings for specific segments
+  async generateVideoEmbedding(request: VideoSegmentRequest): Promise<VideoEmbeddingResult> {
+    try {
+      console.log(`Generating video embedding for ${request.source.type} source, ${request.startTime}s-${request.endTime}s`)
+      
+      let prompt: string
+      let mediaInput: any
+
+      if (request.source.type === 'youtube' && request.source.url) {
+        // Direct YouTube processing
+        prompt = `Analyze this YouTube video segment from ${request.startTime} to ${request.endTime} seconds.
+
+Provide a detailed description of:
+1. Visual elements (objects, people, scenes, actions)
+2. Context and setting
+3. Key visual themes or concepts
+4. Any text or graphics visible
+
+Focus on visual content that would be useful for search and understanding.
+
+YouTube URL: ${request.source.url}
+Time segment: ${request.startTime}s - ${request.endTime}s`
+
+        mediaInput = request.source.url
+
+      } else if (request.source.type === 'upload' && request.source.path) {
+        // Upload video processing via storage URL
+        const { data: urlData } = supabase.storage
+          .from('videos')
+          .getPublicUrl(request.source.path)
+
+        if (!urlData.publicUrl) {
+          throw new Error('Failed to get public URL for uploaded video')
+        }
+
+        prompt = `Analyze this video segment from ${request.startTime} to ${request.endTime} seconds.
+
+Provide a detailed description of:
+1. Visual elements (objects, people, scenes, actions)  
+2. Context and setting
+3. Key visual themes or concepts
+4. Any text or graphics visible
+
+Focus on visual content that would be useful for search and understanding.
+
+Video URL: ${urlData.publicUrl}
+Time segment: ${request.startTime}s - ${request.endTime}s
+${request.frameCount ? `Analyze approximately ${request.frameCount} key frames from this segment.` : ''}`
+
+        mediaInput = urlData.publicUrl
+
+      } else {
+        throw new Error('Invalid video source configuration')
+      }
+
+      // Generate video understanding with Gemini
+      const response = await generateText({
+        model: this.model,
+        prompt,
+        maxTokens: 2000,
+        temperature: 0.1
+      })
+
+      // Generate embedding from the visual description
+      const { generateTextEmbedding } = await import('@/lib/ai/embeddings')
+      const embeddingResult = await generateTextEmbedding(response.text)
+
+      if (embeddingResult.error) {
+        throw new Error(`Embedding generation failed: ${embeddingResult.error}`)
+      }
+
+      return {
+        description: response.text,
+        embedding: embeddingResult.embedding,
+        confidence: 0.9 // Gemini confidence placeholder
+      }
+
+    } catch (error) {
+      console.error('Video embedding generation error:', error)
+      throw new Error(`Failed to generate video embedding: ${error instanceof Error ? error.message : 'Unknown error'}`)
     }
   }
 

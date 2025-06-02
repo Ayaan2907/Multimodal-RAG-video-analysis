@@ -50,6 +50,7 @@ export interface VideoChunk {
   start_time_seconds: number
   end_time_seconds: number
   visual_description?: string
+  transcript_text?: string
   key_frames?: any[]
   topics?: any[]
   entities?: any[]
@@ -217,6 +218,7 @@ export async function createVideoChunk(data: {
   start_time_seconds: number
   end_time_seconds: number
   visual_description?: string
+  transcript_text?: string
   key_frames?: any[]
   topics?: any[]
   entities?: any[]
