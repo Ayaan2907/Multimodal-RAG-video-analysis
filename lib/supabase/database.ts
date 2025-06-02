@@ -1,0 +1,216 @@
+import { supabaseAdmin } from './admin'
+
+export interface VideoRecord {
+  id: string
+  title: string
+  description?: string
+  source_type: 'upload' | 'youtube'
+  source_url?: string
+  file_path?: string
+  thumbnail_url?: string
+  duration_seconds?: number
+  file_size_bytes?: number
+  processing_status: 'uploading' | 'processing' | 'chunking' | 'transcribing' | 'embedding' | 'completed' | 'failed'
+  processing_error?: string
+  metadata?: any
+  created_at: string
+  updated_at: string
+}
+
+export async function createVideoRecord(data: {
+  title: string
+  description?: string
+  source_type: 'upload' | 'youtube'
+  source_url?: string
+  file_path?: string
+  thumbnail_url?: string
+  duration_seconds?: number
+  file_size_bytes?: number
+  metadata?: any
+}): Promise<{ data: VideoRecord | null; error: string | null }> {
+  try {
+    const { data: video, error } = await supabaseAdmin
+      .from('videos')
+      .insert([{
+        ...data,
+        processing_status: 'uploading'
+      }])
+      .select()
+      .single()
+
+    if (error) {
+      console.error('Database insert error:', error)
+      return { data: null, error: error.message }
+    }
+
+    return { data: video, error: null }
+  } catch (error) {
+    console.error('Database insert exception:', error)
+    return {
+      data: null,
+      error: error instanceof Error ? error.message : 'Database operation failed'
+    }
+  }
+}
+
+export async function updateVideoStatus(
+  videoId: string,
+  status: VideoRecord['processing_status'],
+  error?: string
+): Promise<boolean> {
+  try {
+    const updateData: any = { processing_status: status }
+    if (error) {
+      updateData.processing_error = error
+    }
+
+    const { error: updateError } = await supabaseAdmin
+      .from('videos')
+      .update(updateData)
+      .eq('id', videoId)
+
+    if (updateError) {
+      console.error('Status update error:', updateError)
+      return false
+    }
+
+    return true
+  } catch (error) {
+    console.error('Status update exception:', error)
+    return false
+  }
+}
+
+export async function getVideoById(videoId: string): Promise<VideoRecord | null> {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('videos')
+      .select('*')
+      .eq('id', videoId)
+      .single()
+
+    if (error) {
+      console.error('Video fetch error:', error)
+      return null
+    }
+
+    return data
+  } catch (error) {
+    console.error('Video fetch exception:', error)
+    return null
+  }
+}
+
+export async function createTranscript(data: {
+  video_id: string
+  content: string
+  language?: string
+  confidence_score?: number
+  source?: string
+}): Promise<{ id: string | null; error: string | null }> {
+  try {
+    const { data: transcript, error } = await supabaseAdmin
+      .from('transcripts')
+      .insert([data])
+      .select('id')
+      .single()
+
+    if (error) {
+      console.error('Transcript insert error:', error)
+      return { id: null, error: error.message }
+    }
+
+    return { id: transcript.id, error: null }
+  } catch (error) {
+    console.error('Transcript insert exception:', error)
+    return {
+      id: null,
+      error: error instanceof Error ? error.message : 'Database operation failed'
+    }
+  }
+}
+
+export async function createTranscriptSegments(segments: Array<{
+  transcript_id: string
+  video_id: string
+  text_content: string
+  start_time_seconds: number
+  end_time_seconds: number
+  confidence_score?: number
+  speaker_id?: string
+}>): Promise<boolean> {
+  try {
+    const { error } = await supabaseAdmin
+      .from('transcript_segments')
+      .insert(segments)
+
+    if (error) {
+      console.error('Transcript segments insert error:', error)
+      return false
+    }
+
+    return true
+  } catch (error) {
+    console.error('Transcript segments insert exception:', error)
+    return false
+  }
+}
+
+export async function createVideoChunk(data: {
+  video_id: string
+  title?: string
+  description?: string
+  start_time_seconds: number
+  end_time_seconds: number
+  transcript_text?: string
+  visual_description?: string
+  key_frames?: any[]
+  topics?: any[]
+  entities?: any[]
+}): Promise<{ id: string | null; error: string | null }> {
+  try {
+    const { data: chunk, error } = await supabaseAdmin
+      .from('video_chunks')
+      .insert([data])
+      .select('id')
+      .single()
+
+    if (error) {
+      console.error('Video chunk insert error:', error)
+      return { id: null, error: error.message }
+    }
+
+    return { id: chunk.id, error: null }
+  } catch (error) {
+    console.error('Video chunk insert exception:', error)
+    return {
+      id: null,
+      error: error instanceof Error ? error.message : 'Database operation failed'
+    }
+  }
+}
+
+export async function createEmbedding(data: {
+  video_id: string
+  chunk_id?: string
+  content_type: 'transcript' | 'visual' | 'multimodal'
+  content_text: string
+  embedding: number[]
+  metadata?: any
+}): Promise<boolean> {
+  try {
+    const { error } = await supabaseAdmin
+      .from('embeddings')
+      .insert([data])
+
+    if (error) {
+      console.error('Embedding insert error:', error)
+      return false
+    }
+
+    return true
+  } catch (error) {
+    console.error('Embedding insert exception:', error)
+    return false
+  }
+} 
