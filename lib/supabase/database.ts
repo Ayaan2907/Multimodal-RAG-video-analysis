@@ -185,6 +185,15 @@ export async function createTranscriptSegments(segments: Array<{
   speaker_id?: string
 }>): Promise<boolean> {
   try {
+    // Validate that we have a valid transcript_id before attempting insert
+    if (!segments[0]?.transcript_id || !segments[0]?.video_id) {
+      console.error('Missing required IDs for transcript segments:', {
+        transcript_id: segments[0]?.transcript_id,
+        video_id: segments[0]?.video_id
+      })
+      return false
+    }
+
     const { error } = await supabaseAdmin
       .from('transcript_segments')
       .insert(segments)

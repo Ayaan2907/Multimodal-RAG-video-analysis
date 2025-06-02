@@ -1,11 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { uploadVideoFile } from '@/lib/supabase/storage'
 import { createVideoRecord } from '@/lib/supabase/database'
+import { extractAudioFromVideoLocal, checkFFmpegAvailability } from '@/lib/video/audio-extraction'
+import { promises as fs } from 'fs'
+import { join } from 'path'
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100MB
 const ALLOWED_TYPES = ['video/mp4', 'video/avi', 'video/mov', 'video/wmv', 'video/webm']
 
 export async function POST(request: NextRequest) {
+  let tempVideoPath: string | null = null
+  let audioPath: string | null = null
+  
   try {
     const formData = await request.formData()
     const file = formData.get('file') as File
@@ -41,7 +47,29 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Upload file to Supabase storage
+    // Check if FFmpeg is available
+    const ffmpegAvailable = await checkFFmpegAvailability()
+    if (!ffmpegAvailable) {
+      return NextResponse.json(
+        { error: 'FFmpeg not available. Please install FFmpeg to process uploaded videos.' },
+        { status: 500 }
+      )
+    }
+
+    // Save video to temporary location and extract audio
+    const tempDir = process.env.TEMP_DIR || '/tmp'
+    const tempFileName = `temp_${Date.now()}_${Math.random().toString(36).substring(2)}.${file.name.split('.').pop()}`
+    tempVideoPath = join(tempDir, tempFileName)
+    
+    const arrayBuffer = await file.arrayBuffer()
+    const buffer = Buffer.from(arrayBuffer)
+    await fs.writeFile(tempVideoPath, buffer)
+
+    // Extract audio to local file only (no upload, no cleanup)
+    const audioResult = await extractAudioFromVideoLocal(tempVideoPath, 'temp')
+    audioPath = audioResult.audioPath // Keep reference for background processing cleanup
+
+    // Upload only the video file to Supabase storage
     const uploadResult = await uploadVideoFile(file, file.name)
     
     if (uploadResult.error) {
@@ -78,9 +106,8 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Start background processing
-    // Note: In production, you'd trigger this via a queue or webhook
-    processVideoInBackground(videoRecord.id)
+    // Start background processing with audio file path
+    processVideoInBackground(videoRecord.id, audioResult.audioPath)
 
     return NextResponse.json({
       success: true,
@@ -95,21 +122,33 @@ export async function POST(request: NextRequest) {
 
   } catch (error) {
     console.error('Upload API error:', error)
+    
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
     )
+  } finally {
+    // Always cleanup temp video file (but NOT audio file - background processing needs it)
+    if (tempVideoPath) {
+      try {
+        await fs.unlink(tempVideoPath)
+      } catch (cleanupError) {
+        console.warn('Failed to cleanup temp video file:', cleanupError)
+      }
+    }
+    
+    // NOTE: audioPath is NOT cleaned up here - background processing will handle it
   }
 }
 
 // Background processing function
-async function processVideoInBackground(videoId: string) {
+async function processVideoInBackground(videoId: string, audioFilePath: string) {
   try {
     // Import processing functions
     const { processUploadedVideo } = await import('@/lib/video/processing')
     
-    // Trigger processing pipeline
-    await processUploadedVideo(videoId)
+    // Trigger processing pipeline with audio file path
+    await processUploadedVideo(videoId, audioFilePath)
   } catch (error) {
     console.error('Background processing error:', error)
     
@@ -120,5 +159,13 @@ async function processVideoInBackground(videoId: string) {
       'failed', 
       error instanceof Error ? error.message : 'Processing failed'
     )
+  } finally {
+    // Always cleanup audio file after processing (success or failure)
+    try {
+      await fs.unlink(audioFilePath)
+      console.log(`Cleaned up temp audio file: ${audioFilePath}`)
+    } catch (cleanupError) {
+      console.warn(`Failed to cleanup temp audio file ${audioFilePath}:`, cleanupError)
+    }
   }
 } 
