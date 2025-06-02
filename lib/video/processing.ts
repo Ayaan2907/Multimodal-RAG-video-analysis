@@ -10,10 +10,14 @@ import {
 import { getVideoTranscript } from './youtube'
 import { generateTopicBasedChunksWithBatching, analyzeVideoContent } from '@/lib/ai/gemini'
 import { generateChunkEmbeddings } from '@/lib/ai/embeddings'
+import { TranscriptionFactory } from '@/lib/transcription/factory'
+import { GeminiProvider, GeminiChunk } from '@/lib/transcription/providers/gemini'
+import { extractAudioFromVideo, checkFFmpegAvailability, cleanupAudioFile } from './audio-extraction'
+import { TranscriptSegment as TranscriptionSegment } from '@/lib/transcription/types'
 
 const CHUNK_DURATION_SECONDS = parseInt(process.env.CHUNK_DURATION_SECONDS || '60')
 
-export async function processUploadedVideo(videoId: string): Promise<void> {
+export async function processUploadedVideo(videoId: string, audioFilePath?: string): Promise<void> {
   await updateVideoStatus(videoId, 'processing')
   
   try {
@@ -22,34 +26,201 @@ export async function processUploadedVideo(videoId: string): Promise<void> {
       throw new Error('Video not found')
     }
 
-    // For uploaded videos, we need to:
-    // 1. Extract audio and generate transcript (would need speech-to-text)
-    // 2. Analyze video content
-    // 3. Create chunks
-    // 4. Generate embeddings
-
-    // Mock transcript for now - in production, use speech-to-text
-    // Create more realistic mock data for testing
-    const mockTranscript = [
-      { text: 'Welcome to this video demonstration', start: 0, duration: 3, end: 3 },
-      { text: 'Today we will be exploring various concepts', start: 3, duration: 4, end: 7 },
-      { text: 'First, let us discuss the main topic', start: 7, duration: 4, end: 11 },
-      { text: 'This is an important section about the subject matter', start: 11, duration: 5, end: 16 },
-      { text: 'Moving on to the next part of our discussion', start: 16, duration: 4, end: 20 },
-      { text: 'Here we can see some interesting details', start: 20, duration: 4, end: 24 },
-      { text: 'Let me explain this concept in more depth', start: 24, duration: 5, end: 29 },
-      { text: 'This approach has several advantages', start: 29, duration: 4, end: 33 },
-      { text: 'We should also consider the implications', start: 33, duration: 4, end: 37 },
-      { text: 'Finally, let us summarize what we have learned', start: 37, duration: 5, end: 42 },
-      { text: 'Thank you for watching this presentation', start: 42, duration: 4, end: 46 },
-      { text: 'Please feel free to ask any questions', start: 46, duration: 4, end: 50 },
-    ]
-
-    await processTranscriptAndCreateChunks(videoId, mockTranscript, video.file_path || '')
+    if (!audioFilePath) {
+      throw new Error('Audio file path is required for uploaded video processing')
+    }
+    
+    // Get transcription provider
+    const provider = TranscriptionFactory.create()
+    console.log(`Using transcription provider: ${provider.name}`)
+    
+    // Use unified approach if Gemini provider
+    if (provider instanceof GeminiProvider) {
+      await processWithUnifiedGemini(videoId, audioFilePath, provider)
+    } else {
+      // Fallback: Use traditional transcription + chunking approach
+      await processWithTraditionalApproach(videoId, audioFilePath, provider)
+    }
     
   } catch (error) {
     console.error(`Processing error for video ${videoId}:`, error)
     await updateVideoStatus(videoId, 'failed', error instanceof Error ? error.message : 'Unknown error')
+  }
+}
+
+async function processWithUnifiedGemini(
+  videoId: string, 
+  audioFilePath: string, 
+  provider: GeminiProvider
+): Promise<void> {
+  try {
+    // Unified transcription and chunking
+    await updateVideoStatus(videoId, 'transcribing')
+    console.log(`Starting unified Gemini transcription and chunking`)
+    
+    const geminiChunks = await provider.transcribeAndChunk(audioFilePath, CHUNK_DURATION_SECONDS)
+    
+    if (geminiChunks.length === 0) {
+      throw new Error('No chunks generated from Gemini unified processing')
+    }
+
+    console.log(`Unified processing completed: ${geminiChunks.length} chunks`)
+
+    // Create full transcript from chunks
+    const fullTranscript = geminiChunks.map(chunk => chunk.transcript).join(' ')
+    const { id: transcriptId, error: transcriptError } = await createTranscript({
+      video_id: videoId,
+      content: fullTranscript,
+      source: 'gemini'
+    })
+
+    if (transcriptError || !transcriptId) {
+      throw new Error(`Failed to create transcript: ${transcriptError}`)
+    }
+
+    // Create transcript segments from chunks - add validation
+    const segments = geminiChunks
+      .filter(chunk => chunk.transcript && chunk.transcript.trim().length > 0)
+      .map(chunk => ({
+        transcript_id: transcriptId,
+        video_id: videoId,
+        text_content: chunk.transcript,
+        start_time_seconds: chunk.startTime,
+        end_time_seconds: chunk.endTime
+      }))
+
+    if (segments.length === 0) {
+      throw new Error('No valid transcript segments to create')
+    }
+
+    const segmentsCreated = await createTranscriptSegments(segments)
+    if (!segmentsCreated) {
+      throw new Error('Failed to create transcript segments')
+    }
+
+    // Create video chunks in database
+    await updateVideoStatus(videoId, 'chunking')
+    const chunkIds: string[] = []
+    
+    for (const chunk of geminiChunks) {
+      const { id: chunkId, error: chunkError } = await createVideoChunk({
+        video_id: videoId,
+        title: chunk.title,
+        description: chunk.description,
+        start_time_seconds: chunk.startTime,
+        end_time_seconds: chunk.endTime,
+        topics: chunk.topics
+      })
+
+      if (chunkError || !chunkId) {
+        console.error(`Failed to create chunk: ${chunkError}`)
+        continue
+      }
+
+      chunkIds.push(chunkId)
+    }
+
+    if (chunkIds.length === 0) {
+      throw new Error('No chunks created successfully')
+    }
+
+    // Generate embeddings
+    await updateVideoStatus(videoId, 'embedding')
+    await generateAndStoreEmbeddingsFromChunks(videoId, geminiChunks, chunkIds)
+
+    // Mark as completed
+    await updateVideoStatus(videoId, 'completed')
+
+  } catch (error) {
+    console.error('Unified Gemini processing error:', error)
+    throw error
+  }
+}
+
+async function processWithTraditionalApproach(
+  videoId: string,
+  audioFilePath: string,
+  provider: any
+): Promise<void> {
+  try {
+    // Traditional transcription
+    await updateVideoStatus(videoId, 'transcribing')
+    console.log(`Starting traditional transcription with provider: ${provider.name}`)
+    
+    let transcriptSegments: TranscriptionSegment[]
+    if (provider.transcribeFile) {
+      transcriptSegments = await provider.transcribeFile(audioFilePath, {
+        language: 'en',
+        punctuate: true
+      })
+    } else {
+      throw new Error('Provider does not support direct file upload')
+    }
+    
+    if (transcriptSegments.length === 0) {
+      throw new Error('No transcript generated from audio')
+    }
+
+    console.log(`Transcription completed: ${transcriptSegments.length} segments`)
+
+    // Convert transcription segments to our processing format
+    const processingSegments = transcriptSegments.map((seg: TranscriptionSegment) => ({
+      text: seg.text,
+      start: seg.start,
+      duration: seg.end - seg.start,
+      end: seg.end
+    }))
+
+    // Use existing pipeline for chunking and processing
+    const video = await getVideoById(videoId)
+    await processTranscriptAndCreateChunks(videoId, processingSegments, video?.file_path || '')
+    
+  } catch (error) {
+    console.error('Traditional transcription processing error:', error)
+    throw error
+  }
+}
+
+async function generateAndStoreEmbeddingsFromChunks(
+  videoId: string,
+  geminiChunks: GeminiChunk[],
+  chunkIds: string[]
+): Promise<void> {
+  try {
+    // Prepare chunks for embedding generation
+    const chunksForEmbedding = geminiChunks.map((chunk, index) => ({
+      id: chunkIds[index],
+      transcriptText: chunk.transcript,
+      visualDescription: '', // Would be generated from video analysis
+      topics: chunk.topics
+    }))
+
+    // Generate embeddings
+    const embeddingResults = await generateChunkEmbeddings(chunksForEmbedding)
+
+    // Store embeddings in database
+    for (const result of embeddingResults) {
+      if (result.error || result.embedding.length === 0) {
+        console.error(`Embedding error for chunk ${result.chunkId}: ${result.error}`)
+        continue
+      }
+
+      const success = await createEmbedding({
+        video_id: videoId,
+        chunk_id: result.chunkId,
+        content_type: result.contentType,
+        content_text: chunksForEmbedding.find(c => c.id === result.chunkId)?.transcriptText || '',
+        embedding: result.embedding
+      })
+
+      if (!success) {
+        console.error(`Failed to store embedding for chunk ${result.chunkId}`)
+      }
+    }
+
+  } catch (error) {
+    console.error('Embedding generation error:', error)
+    throw error
   }
 }
 
@@ -91,7 +262,7 @@ async function processTranscriptAndCreateChunks(
     const { id: transcriptId, error: transcriptError } = await createTranscript({
       video_id: videoId,
       content: fullTranscript,
-      source: videoUrl.includes('youtube') ? 'youtube' : 'auto'
+      source: videoUrl.includes('youtube') ? 'youtube' : 'assemblyai'
     })
 
     if (transcriptError || !transcriptId) {
