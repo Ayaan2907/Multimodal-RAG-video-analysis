@@ -42,8 +42,20 @@ export function isValidYouTubeUrl(url: string): boolean {
 
 export async function getVideoInfo(videoId: string): Promise<YouTubeVideoInfo | null> {
   try {
-    // This would typically use YouTube Data API v3
-    // For now, we'll return mock data
+    // Check if YouTube API key is available
+    if (!process.env.YOUTUBE_API_KEY) {
+      console.warn('YouTube API key not found, using basic video info')
+      // Return basic info when API key is not available
+      return {
+        id: videoId,
+        title: `YouTube Video ${videoId}`,
+        description: 'Video description not available',
+        duration: 0, // Will be updated from transcript if available
+        thumbnailUrl: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+        channelTitle: 'Unknown Channel'
+      }
+    }
+
     const response = await fetch(
       `https://www.googleapis.com/youtube/v3/videos?id=${videoId}&key=${process.env.YOUTUBE_API_KEY}&part=snippet,contentDetails`,
       { method: 'GET' }
@@ -51,7 +63,15 @@ export async function getVideoInfo(videoId: string): Promise<YouTubeVideoInfo | 
 
     if (!response.ok) {
       console.error('YouTube API error:', response.status)
-      return null
+      // Fallback to basic info
+      return {
+        id: videoId,
+        title: `YouTube Video ${videoId}`,
+        description: 'Video description not available',
+        duration: 0,
+        thumbnailUrl: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+        channelTitle: 'Unknown Channel'
+      }
     }
 
     const data = await response.json()
@@ -77,39 +97,51 @@ export async function getVideoInfo(videoId: string): Promise<YouTubeVideoInfo | 
     }
   } catch (error) {
     console.error('Error fetching video info:', error)
-    return null
+    // Fallback to basic info
+    return {
+      id: videoId,
+      title: `YouTube Video ${videoId}`,
+      description: 'Video description not available',
+      duration: 0,
+      thumbnailUrl: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+      channelTitle: 'Unknown Channel'
+    }
   }
 }
 
 export async function getVideoTranscript(videoId: string): Promise<TranscriptSegment[]> {
   try {
-    // This would use youtube-transcript-api or similar
-    // For production, you'd implement this as a separate service
+    console.log(`Fetching transcript for video: ${videoId}`)
     
-    // Mock implementation - replace with actual transcript fetching
-    const mockTranscript: TranscriptSegment[] = [
-      { text: 'Welcome to this video tutorial', start: 0, duration: 3, end: 3 },
-      { text: 'Today we will be learning about', start: 3, duration: 4, end: 7 },
-      { text: 'advanced video processing techniques', start: 7, duration: 5, end: 12 },
-      // ... more segments
-    ]
-
-    return mockTranscript
-
-    // Actual implementation would look like:
-    /*
+    // Use the youtube-transcript package
     const { YoutubeTranscript } = await import('youtube-transcript')
     const transcript = await YoutubeTranscript.fetchTranscript(videoId)
     
+    console.log(`Found ${transcript.length} transcript segments`)
+    
+    // Convert the transcript format to our expected format
+    // Note: youtube-transcript already returns offset and duration in seconds, not milliseconds
     return transcript.map(item => ({
-      text: item.text,
-      start: item.offset / 1000, // Convert to seconds
-      duration: item.duration / 1000,
-      end: (item.offset + item.duration) / 1000
+      text: item.text.trim(),
+      start: parseFloat(item.offset.toString()), // Already in seconds
+      duration: parseFloat(item.duration.toString()), // Already in seconds
+      end: parseFloat(item.offset.toString()) + parseFloat(item.duration.toString())
     }))
-    */
   } catch (error) {
     console.error('Error fetching transcript:', error)
+
+    if (error instanceof Error) {
+      console.error('Transcript error details:', error.message)
+      
+      // Check for common error types
+      if (error.message.includes('Could not retrieve a transcript') || 
+          error.message.includes('No transcript available')) {
+        console.warn(`No transcript available for video ${videoId}`)
+      } else if (error.message.includes('Video unavailable')) {
+        console.warn(`Video ${videoId} is unavailable or private`)
+      }
+    }
+    
     return []
   }
 }

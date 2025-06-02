@@ -1,4 +1,5 @@
 import { supabaseAdmin } from './admin'
+import { createClient } from './client'
 
 export interface VideoRecord {
   id: string
@@ -15,6 +16,50 @@ export interface VideoRecord {
   metadata?: any
   created_at: string
   updated_at: string
+}
+
+export interface Transcript {
+  id: string
+  video_id: string
+  content: string
+  language?: string
+  confidence_score?: number
+  source?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface TranscriptSegment {
+  id: string
+  transcript_id: string
+  video_id: string
+  text_content: string
+  start_time_seconds: number
+  end_time_seconds: number
+  confidence_score?: number
+  speaker_id?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface VideoChunk {
+  id: string
+  video_id: string
+  title?: string
+  description?: string
+  start_time_seconds: number
+  end_time_seconds: number
+  visual_description?: string
+  key_frames?: any[]
+  topics?: any[]
+  entities?: any[]
+  created_at: string
+}
+
+export interface VideoWithDetails extends VideoRecord {
+  transcript?: Transcript
+  transcriptSegments?: TranscriptSegment[]
+  chunks?: VideoChunk[]
 }
 
 export async function createVideoRecord(data: {
@@ -162,7 +207,6 @@ export async function createVideoChunk(data: {
   description?: string
   start_time_seconds: number
   end_time_seconds: number
-  transcript_text?: string
   visual_description?: string
   key_frames?: any[]
   topics?: any[]
@@ -212,5 +256,97 @@ export async function createEmbedding(data: {
   } catch (error) {
     console.error('Embedding insert exception:', error)
     return false
+  }
+}
+
+export async function getVideoWithDetails(videoId: string): Promise<VideoWithDetails | null> {
+  try {
+    const supabase = createClient()
+
+    // Fetch video
+    const { data: video, error: videoError } = await supabase
+      .from('videos')
+      .select('*')
+      .eq('id', videoId)
+      .single()
+
+    if (videoError || !video) {
+      console.error('Error fetching video:', videoError)
+      return null
+    }
+
+    // Fetch transcript
+    const { data: transcript, error: transcriptError } = await supabase
+      .from('transcripts')
+      .select('*')
+      .eq('video_id', videoId)
+      .single()
+
+    if (transcriptError && transcriptError.code !== 'PGRST116') {
+      console.error('Error fetching transcript:', transcriptError)
+    }
+
+    // Fetch transcript segments if transcript exists
+    let transcriptSegments: TranscriptSegment[] = []
+    if (transcript) {
+      const { data: segments, error: segmentsError } = await supabase
+        .from('transcript_segments')
+        .select('*')
+        .eq('transcript_id', transcript.id)
+        .order('start_time_seconds', { ascending: true })
+
+      if (segmentsError) {
+        console.error('Error fetching transcript segments:', segmentsError)
+      } else {
+        transcriptSegments = segments || []
+      }
+    }
+
+    // Fetch video chunks
+    const { data: chunks, error: chunksError } = await supabase
+      .from('video_chunks')
+      .select('*')
+      .eq('video_id', videoId)
+      .order('start_time_seconds', { ascending: true })
+
+    if (chunksError) {
+      console.error('Error fetching video chunks:', chunksError)
+    }
+
+    return {
+      ...video,
+      transcript: transcript || undefined,
+      transcriptSegments,
+      chunks: chunks || []
+    }
+  } catch (error) {
+    console.error('Error in getVideoWithDetails:', error)
+    return null
+  }
+}
+
+export async function getTranscriptTextForChunk(
+  videoId: string,
+  startTimeSeconds: number,
+  endTimeSeconds: number
+): Promise<string> {
+  try {
+    const { data: segments, error } = await supabaseAdmin
+      .from('transcript_segments')
+      .select('text_content')
+      .eq('video_id', videoId)
+      .gte('start_time_seconds', startTimeSeconds)
+      .lte('end_time_seconds', endTimeSeconds)
+      .order('start_time_seconds')
+
+    if (error) {
+      console.error('Error fetching transcript segments for chunk:', error)
+      return ''
+    }
+
+    return segments?.map((seg: { text_content: string }) => seg.text_content).join(' ') || ''
+  } catch (error) {
+    console.error('Error reconstructing transcript text for chunk:', error)
+    return ''
   }
 } 

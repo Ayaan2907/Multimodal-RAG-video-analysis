@@ -68,6 +68,9 @@ importers:
       tailwind-merge:
         specifier: ^3.3.0
         version: 3.3.0
+      youtube-transcript:
+        specifier: ^1.2.1
+        version: 1.2.1
       youtube-transcript-api:
         specifier: ^2.0.4
         version: 2.0.4
@@ -2597,6 +2600,10 @@ packages:
 
   youtube-transcript-api@2.0.4:
     resolution: {integrity: sha512-bJIMy0eP6d8XBF477aNYddbMVDFJs/DwYFrh2WihWrntTpmrXS+bRaxAk8fInKS9Ol6mAuWoMghMxoDKDzKfUg==}
+
+  youtube-transcript@1.2.1:
+    resolution: {integrity: sha512-TvEGkBaajKw+B6y91ziLuBLsa5cawgowou+Bk0ciGpjELDfAzSzTGXaZmeSSkUeknCPpEr/WGApOHDwV7V+Y9Q==}
+    engines: {node: '>=18.0.0'}
 
   zod-to-json-schema@3.24.5:
     resolution: {integrity: sha512-/AuWwMP+YqiPbsJx5D6TfgRTc4kTLjsh5SOcd4bLsfUg2RcEXrFMJl1DGgdHy2aCfsIA/cr/1JM0xcB2GZji8g==}
@@ -5344,6 +5351,8 @@ snapshots:
       axios: 1.9.0
     transitivePeerDependencies:
       - debug
+
+  youtube-transcript@1.2.1: {}
 
   zod-to-json-schema@3.24.5(zod@3.25.46):
     dependencies:

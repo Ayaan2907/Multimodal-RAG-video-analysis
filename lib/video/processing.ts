@@ -4,10 +4,11 @@ import {
   createTranscript, 
   createTranscriptSegments,
   createVideoChunk,
-  createEmbedding
+  createEmbedding,
+  getTranscriptTextForChunk
 } from '@/lib/supabase/database'
 import { getVideoTranscript } from './youtube'
-import { generateTopicBasedChunks, analyzeVideoContent } from '@/lib/ai/gemini'
+import { generateTopicBasedChunksWithBatching, analyzeVideoContent } from '@/lib/ai/gemini'
 import { generateChunkEmbeddings } from '@/lib/ai/embeddings'
 
 const CHUNK_DURATION_SECONDS = parseInt(process.env.CHUNK_DURATION_SECONDS || '60')
@@ -28,9 +29,20 @@ export async function processUploadedVideo(videoId: string): Promise<void> {
     // 4. Generate embeddings
 
     // Mock transcript for now - in production, use speech-to-text
+    // Create more realistic mock data for testing
     const mockTranscript = [
-      { text: 'This is a sample transcript segment', start: 0, duration: 5, end: 5 },
-      { text: 'More content would be extracted here', start: 5, duration: 5, end: 10 },
+      { text: 'Welcome to this video demonstration', start: 0, duration: 3, end: 3 },
+      { text: 'Today we will be exploring various concepts', start: 3, duration: 4, end: 7 },
+      { text: 'First, let us discuss the main topic', start: 7, duration: 4, end: 11 },
+      { text: 'This is an important section about the subject matter', start: 11, duration: 5, end: 16 },
+      { text: 'Moving on to the next part of our discussion', start: 16, duration: 4, end: 20 },
+      { text: 'Here we can see some interesting details', start: 20, duration: 4, end: 24 },
+      { text: 'Let me explain this concept in more depth', start: 24, duration: 5, end: 29 },
+      { text: 'This approach has several advantages', start: 29, duration: 4, end: 33 },
+      { text: 'We should also consider the implications', start: 33, duration: 4, end: 37 },
+      { text: 'Finally, let us summarize what we have learned', start: 37, duration: 5, end: 42 },
+      { text: 'Thank you for watching this presentation', start: 42, duration: 4, end: 46 },
+      { text: 'Please feel free to ask any questions', start: 46, duration: 4, end: 50 },
     ]
 
     await processTranscriptAndCreateChunks(videoId, mockTranscript, video.file_path || '')
@@ -72,6 +84,8 @@ async function processTranscriptAndCreateChunks(
   videoUrl: string
 ): Promise<void> {
   try {
+    console.log(`Processing ${transcriptSegments.length} transcript segments for video ${videoId}`)
+
     // Create full transcript record
     const fullTranscript = transcriptSegments.map(seg => seg.text).join(' ')
     const { id: transcriptId, error: transcriptError } = await createTranscript({
@@ -98,19 +112,19 @@ async function processTranscriptAndCreateChunks(
       throw new Error('Failed to create transcript segments')
     }
 
-    // Generate topic-based chunks
+    // Use hybrid approach for chunking
     await updateVideoStatus(videoId, 'chunking')
     let chunks: Array<{
       title: string
       description: string
-      startTime: number
-      endTime: number
-      transcriptText: string
+      start_time_seconds: number
+      end_time_seconds: number
       topics: string[]
     }> = []
 
     try {
-      chunks = await generateTopicBasedChunks(
+      // Use the new batching approach
+      const aiChunks = await generateTopicBasedChunksWithBatching(
         transcriptSegments.map(seg => ({
           text: seg.text,
           startTime: seg.start,
@@ -118,27 +132,38 @@ async function processTranscriptAndCreateChunks(
         })),
         CHUNK_DURATION_SECONDS
       )
+
+      // Convert to standardized format (no transcript_text stored)
+      chunks = aiChunks.map(chunk => ({
+        title: chunk.title,
+        description: chunk.description,
+        start_time_seconds: chunk.startTime,
+        end_time_seconds: chunk.endTime,
+        topics: chunk.topics
+      }))
+
+      console.log(`Hybrid chunking generated ${chunks.length} chunks`)
     } catch (aiError) {
       console.error('AI chunking failed, using fallback:', aiError)
       
-      // Fallback: Create simple time-based chunks
-      chunks = createTimeBasedChunks(transcriptSegments, CHUNK_DURATION_SECONDS)
+      // Simple fallback: Create time-based chunks
+      chunks = createSimpleTimeBasedChunks(transcriptSegments, CHUNK_DURATION_SECONDS)
+      console.log(`Fallback chunking created ${chunks.length} chunks`)
     }
 
     if (chunks.length === 0) {
-      throw new Error('No chunks generated')
+      throw new Error('No chunks generated from either AI or fallback method')
     }
 
-    // Create video chunks in database
+    // Create video chunks in database (without transcript_text)
     const chunkIds: string[] = []
     for (const chunk of chunks) {
       const { id: chunkId, error: chunkError } = await createVideoChunk({
         video_id: videoId,
         title: chunk.title,
         description: chunk.description,
-        start_time_seconds: chunk.startTime,
-        end_time_seconds: chunk.endTime,
-        transcript_text: chunk.transcriptText,
+        start_time_seconds: chunk.start_time_seconds,
+        end_time_seconds: chunk.end_time_seconds,
         topics: chunk.topics
       })
 
@@ -154,7 +179,7 @@ async function processTranscriptAndCreateChunks(
       throw new Error('No chunks created successfully')
     }
 
-    // Generate embeddings
+    // Generate embeddings (reconstruct transcript text when needed)
     await updateVideoStatus(videoId, 'embedding')
     await generateAndStoreEmbeddings(videoId, chunks, chunkIds)
 
@@ -167,56 +192,48 @@ async function processTranscriptAndCreateChunks(
   }
 }
 
-// Fallback function for simple time-based chunking
-function createTimeBasedChunks(
+// Simple fallback function for when AI fails
+function createSimpleTimeBasedChunks(
   transcriptSegments: Array<{ text: string; start: number; duration: number; end: number }>,
   chunkDuration: number
 ): Array<{
   title: string
   description: string
-  startTime: number
-  endTime: number
-  transcriptText: string
+  start_time_seconds: number
+  end_time_seconds: number
   topics: string[]
 }> {
-  const chunks = []
-  let currentChunk = {
-    title: '',
-    description: '',
-    startTime: 0,
-    endTime: 0,
-    transcriptText: '',
-    topics: [] as string[]
+  console.log(`Creating simple time-based chunks with ${chunkDuration}s duration`)
+  
+  const chunks: Array<{
+    title: string
+    description: string
+    start_time_seconds: number
+    end_time_seconds: number
+    topics: string[]
+  }> = []
+  
+  if (transcriptSegments.length === 0) {
+    return chunks
   }
 
-  for (const segment of transcriptSegments) {
-    if (currentChunk.transcriptText === '') {
-      // Start new chunk
-      currentChunk.startTime = segment.start
-      currentChunk.title = `Segment ${segment.start}s - ${segment.start + chunkDuration}s`
-      currentChunk.description = `Video content from ${segment.start} to ${segment.start + chunkDuration} seconds`
-    }
+  const totalDuration = transcriptSegments[transcriptSegments.length - 1].end
+  let currentStart = 0
+  let chunkIndex = 1
 
-    currentChunk.transcriptText += segment.text + ' '
-    currentChunk.endTime = segment.end
-
-    // If chunk duration reached, save it and start new one
-    if (currentChunk.endTime - currentChunk.startTime >= chunkDuration) {
-      chunks.push({ ...currentChunk })
-      currentChunk = {
-        title: '',
-        description: '',
-        startTime: 0,
-        endTime: 0,
-        transcriptText: '',
-        topics: []
-      }
-    }
-  }
-
-  // Add final chunk if it has content
-  if (currentChunk.transcriptText) {
-    chunks.push(currentChunk)
+  while (currentStart < totalDuration) {
+    const chunkEnd = Math.min(currentStart + chunkDuration, totalDuration)
+    
+    chunks.push({
+      title: `Segment ${chunkIndex}`,
+      description: `Video content from ${Math.round(currentStart)}s to ${Math.round(chunkEnd)}s`,
+      start_time_seconds: currentStart,
+      end_time_seconds: chunkEnd,
+      topics: []
+    })
+    
+    chunkIndex++
+    currentStart = chunkEnd
   }
 
   return chunks
@@ -227,21 +244,30 @@ async function generateAndStoreEmbeddings(
   chunks: Array<{
     title: string
     description: string
-    startTime: number
-    endTime: number
-    transcriptText: string
+    start_time_seconds: number
+    end_time_seconds: number
     topics: string[]
   }>,
   chunkIds: string[]
 ): Promise<void> {
   try {
-    // Prepare chunks for embedding generation
-    const chunksForEmbedding = chunks.map((chunk, index) => ({
-      id: chunkIds[index],
-      transcriptText: chunk.transcriptText,
-      visualDescription: '', // Would be generated from video analysis
-      topics: chunk.topics
-    }))
+    // Prepare chunks for embedding generation (reconstruct transcript text)
+    const chunksForEmbedding = await Promise.all(
+      chunks.map(async (chunk, index) => {
+        const transcriptText = await getTranscriptTextForChunk(
+          videoId,
+          chunk.start_time_seconds,
+          chunk.end_time_seconds
+        )
+        
+        return {
+          id: chunkIds[index],
+          transcriptText,
+          visualDescription: '', // Would be generated from video analysis
+          topics: chunk.topics
+        }
+      })
+    )
 
     // Generate embeddings
     const embeddingResults = await generateChunkEmbeddings(chunksForEmbedding)
