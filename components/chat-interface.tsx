@@ -27,7 +27,7 @@ interface ChatMessage {
 
 interface ChatInterfaceProps {
   video: VideoWithDetails
-  onSourceClick?: (timeInSeconds: number) => void // Optional: for player interaction
+  onSourceClick?: (timeInSeconds: number) => void
 }
 
 export function ChatInterface({ video, onSourceClick }: ChatInterfaceProps) {
@@ -158,7 +158,7 @@ export function ChatInterface({ video, onSourceClick }: ChatInterfaceProps) {
                     {message.sources.map(source => (
                       <button
                         key={source.chunkId}
-                        onClick={() => onSourceClick && onSourceClick(source.startTimeSeconds)}
+                        onClick={() => onSourceClick?.(source.startTimeSeconds)}
                         className="w-full text-left text-xs px-2 py-1.5 rounded-md hover:bg-muted/50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:opacity-50 disabled:cursor-not-allowed"
                         disabled={!onSourceClick}
                         title={onSourceClick ? "Click to jump to this part of the video" : "Video interaction disabled"}

@@ -5,14 +5,16 @@ import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Clock, FileText, Scissors } from 'lucide-react'
 import { formatDuration } from '@/lib/video/youtube'
+import { Button } from '@/components/ui/button'
 
 interface VideoTranscriptProps {
   transcript?: Transcript
   segments?: TranscriptSegment[]
   chunks?: VideoChunk[]
+  onTimeClick?: (time: number) => void
 }
 
-export function VideoTranscript({ transcript, segments = [], chunks = [] }: VideoTranscriptProps) {
+export function VideoTranscript({ transcript, segments = [], chunks = [], onTimeClick }: VideoTranscriptProps) {
   if (!transcript && segments.length === 0 && chunks.length === 0) {
     return (
       <div className="p-8 text-center border-2 border-dashed border-muted-foreground/25 rounded-lg">
@@ -58,10 +60,17 @@ export function VideoTranscript({ transcript, segments = [], chunks = [] }: Vide
                   className="p-3 bg-muted/50 rounded-lg hover:bg-muted transition-colors"
                 >
                   <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
-                    <Clock className="h-3 w-3" />
-                    <span>
-                      {formatDuration(segment.start_time_seconds)} - {formatDuration(segment.end_time_seconds)}
-                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2"
+                      onClick={() => onTimeClick?.(segment.start_time_seconds)}
+                    >
+                      <Clock className="h-3 w-3 mr-1" />
+                      <span>
+                        {formatDuration(segment.start_time_seconds)} - {formatDuration(segment.end_time_seconds)}
+                      </span>
+                    </Button>
                     {segment.confidence_score && (
                       <Badge variant="outline" className="text-xs">
                         {Math.round(segment.confidence_score * 100)}% confidence
@@ -92,12 +101,17 @@ export function VideoTranscript({ transcript, segments = [], chunks = [] }: Vide
                     <h4 className="font-medium">
                       {chunk.title || `Chunk ${index + 1}`}
                     </h4>
-                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                      <Clock className="h-3 w-3" />
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2"
+                      onClick={() => onTimeClick?.(chunk.start_time_seconds)}
+                    >
+                      <Clock className="h-3 w-3 mr-1" />
                       <span>
                         {formatDuration(chunk.start_time_seconds)} - {formatDuration(chunk.end_time_seconds)}
                       </span>
-                    </div>
+                    </Button>
                   </div>
                   
                   {chunk.description && (
