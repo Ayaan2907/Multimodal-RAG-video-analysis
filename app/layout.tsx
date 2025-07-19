@@ -1,9 +1,10 @@
 import { GeistSans } from "geist/font/sans";
 import { ThemeProvider } from "next-themes";
 import "./globals.css";
+import { env } from "./config/env";
 
-const defaultUrl = process.env.NEXT_PUBLIC_APP_URL
-  ? `https://${process.env.NEXT_PUBLIC_APP_URL}`
+const defaultUrl = env.NEXT_PUBLIC_APP_URL
+  ? `https://${env.NEXT_PUBLIC_APP_URL}`
   : "http://localhost:3000";
 
 export const metadata = {

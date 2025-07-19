@@ -3,17 +3,17 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { createClient } from '@supabase/supabase-js'
 import { AudioExtractionResult } from '../transcription/types'
-
+import { env } from '@/app/config/env'
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+  env.NEXT_PUBLIC_SUPABASE_URL!,
+  env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
 export async function extractAudioFromVideo(
   videoPath: string,
   videoId: string
 ): Promise<AudioExtractionResult> {
-  const tempDir = process.env.TEMP_DIR || '/tmp'
+  const tempDir = env.TEMP_DIR 
   const audioFileName = `audio_${videoId}_${Date.now()}.mp3`
   const audioPath = join(tempDir, audioFileName)
 

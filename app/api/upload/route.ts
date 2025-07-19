@@ -57,7 +57,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Save video to temporary location and extract audio
-    const tempDir = process.env.TEMP_DIR || '/tmp'
+    const tempDir = env.TEMP_DIR || '/tmp'
     const tempFileName = `temp_${Date.now()}_${Math.random().toString(36).substring(2)}.${file.name.split('.').pop()}`
     tempVideoPath = join(tempDir, tempFileName)
     

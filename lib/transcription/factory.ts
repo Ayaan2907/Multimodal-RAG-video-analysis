@@ -1,6 +1,7 @@
 import { TranscriptionProvider } from './types'
 import { AssemblyAIProvider } from './providers/assemblyai'
 import { GeminiProvider } from './providers/gemini'
+import { env } from "@/app/config/env";
 
 export class TranscriptionFactory {
   private static providers = new Map<string, () => TranscriptionProvider>()
@@ -11,16 +12,16 @@ export class TranscriptionFactory {
 
     // Register Gemini provider (primary)
     this.register('gemini', () => {
-      const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY
+      const apiKey = env.GOOGLE_AI_API_KEY
       if (!apiKey) {
-        throw new Error('GOOGLE_GENERATIVE_AI_API_KEY environment variable is required for Gemini transcription')
+        throw new Error('GOOGLE_AI_API_KEY environment variable is required for Gemini transcription')
       }
       return new GeminiProvider(apiKey)
     })
 
     // Register AssemblyAI provider (fallback)
     this.register('assemblyai', () => {
-      const apiKey = process.env.ASSEMBLYAI_API_KEY
+      const apiKey = env.ASSEMBLYAI_API_KEY
       if (!apiKey) {
         throw new Error('ASSEMBLYAI_API_KEY environment variable is required')
       }
@@ -41,7 +42,7 @@ export class TranscriptionFactory {
   static create(providerName?: string): TranscriptionProvider {
     this.initialize()
     
-    const name = providerName || process.env.TRANSCRIPTION_PROVIDER || 'gemini'
+    const name = providerName || env.TRANSCRIPTION_PROVIDER || 'gemini'
     const factory = this.providers.get(name)
     
     if (!factory) {

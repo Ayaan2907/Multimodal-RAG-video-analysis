@@ -1,6 +1,7 @@
 // Note: This is a server-side implementation
 // The youtube-transcript-api would need to be implemented as a separate service
 // or use a different approach for production
+import { env } from "@/app/config/env";
 
 export interface YouTubeVideoInfo {
   id: string
@@ -43,7 +44,7 @@ export function isValidYouTubeUrl(url: string): boolean {
 export async function getVideoInfo(videoId: string): Promise<YouTubeVideoInfo | null> {
   try {
     // Check if YouTube API key is available
-    if (!process.env.YOUTUBE_API_KEY) {
+    if (!env.YOUTUBE_API_KEY) {
       console.warn('YouTube API key not found, using basic video info')
       // Return basic info when API key is not available
       return {
@@ -57,7 +58,7 @@ export async function getVideoInfo(videoId: string): Promise<YouTubeVideoInfo | 
     }
 
     const response = await fetch(
-      `https://www.googleapis.com/youtube/v3/videos?id=${videoId}&key=${process.env.YOUTUBE_API_KEY}&part=snippet,contentDetails`,
+      `https://www.googleapis.com/youtube/v3/videos?id=${videoId}&key=${env.YOUTUBE_API_KEY}&part=snippet,contentDetails`,
       { method: 'GET' }
     )
 

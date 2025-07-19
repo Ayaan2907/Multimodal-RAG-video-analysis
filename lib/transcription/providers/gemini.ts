@@ -3,10 +3,11 @@ import { generateText } from 'ai'
 import { createClient } from '@supabase/supabase-js'
 import { promises as fs } from 'fs'
 import { TranscriptionProvider, TranscriptSegment, TranscriptionOptions } from '../types'
+import { env } from "@/app/config/env";
 
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+  env.NEXT_PUBLIC_SUPABASE_URL!,
+  env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
 export interface GeminiChunk {

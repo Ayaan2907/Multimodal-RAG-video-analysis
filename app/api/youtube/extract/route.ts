@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createVideoRecord } from '@/lib/supabase/database'
 import { extractVideoId, isValidYouTubeUrl, getVideoInfo } from '@/lib/video/youtube'
-
+import { env } from '@/app/config/env'
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
@@ -40,7 +40,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Check video duration (optional limit)
-    const maxDuration = parseInt(process.env.MAX_VIDEO_DURATION_MINUTES || '30') * 60
+    const maxDuration = parseInt(env.MAX_VIDEO_DURATION_MINUTES || '30') * 60
     if (videoInfo.duration > maxDuration) {
       return NextResponse.json(
         { error: `Video duration (${Math.round(videoInfo.duration / 60)} minutes) exceeds maximum allowed (${maxDuration / 60} minutes)` },

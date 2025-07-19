@@ -1,10 +1,11 @@
 import { google } from '@ai-sdk/google'
 import { generateText } from 'ai'
+import  { env } from "@/app/config/env";
 
-const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY!
+const apiKey = env.GOOGLE_AI_API_KEY!
 
 if (!apiKey) {
-  throw new Error('Missing GOOGLE_GENERATIVE_AI_API_KEY environment variable')
+  throw new Error('Missing GOOGLE_AI_API_KEY environment variable')
 }
 
 // Gemini models for different tasks

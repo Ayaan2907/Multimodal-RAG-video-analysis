@@ -15,8 +15,9 @@ import { TranscriptionFactory } from '@/lib/transcription/factory'
 import { GeminiProvider, GeminiChunk } from '@/lib/transcription/providers/gemini'
 import { extractAudioFromVideo, checkFFmpegAvailability, cleanupAudioFile } from './audio-extraction'
 import { TranscriptSegment as TranscriptionSegment } from '@/lib/transcription/types'
+import { env } from "@/app/config/env";
 
-const CHUNK_DURATION_SECONDS = parseInt(process.env.CHUNK_DURATION_SECONDS || '60')
+const CHUNK_DURATION_SECONDS = parseInt(env.CHUNK_DURATION_SECONDS)
 const EMBEDDING_BATCH_SIZE = 100;
 
 export async function processUploadedVideo(videoId: string, audioFilePath?: string): Promise<void> {
