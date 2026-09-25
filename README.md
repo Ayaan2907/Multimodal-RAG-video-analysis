@@ -107,3 +107,38 @@ npx -y @modelcontextprotocol/inspector --cli bun run mcp \
   --method tools/call --tool-name ask_video \
   --tool-arg video_id=vid_fixture_001 --tool-arg message="When was the contract signed?"
 ```
+
+## Deploy (Railway)
+
+The repo ships `railway.json` + `nixpacks.toml`: bun install/build from the
+committed lockfile, `next start`, **ffmpeg in the image** (audio extraction for
+uploads), and a healthcheck on `GET /api/health` (shallow liveness — no auth,
+no database, no secrets).
+
+1. Create a Railway service from this repo.
+2. Set the environment variables below as config variables. They are visible to
+   both build and runtime; `NEXT_PUBLIC_*` must be set before the **first
+   build**, because Next.js inlines them into the client bundle.
+3. Deploy — Railway waits for `/api/health` before marking the deployment live.
+
+### Environment variable manifest
+
+| Variable | Read at | Required | Purpose |
+| --- | --- | --- | --- |
+| `NEXT_PUBLIC_SUPABASE_URL` | build + runtime | yes | Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | build + runtime | yes | Supabase anon key (browser client) |
+| `SUPABASE_SERVICE_ROLE_KEY` | runtime | yes | Server-only service role (must be a **rotated** key — never a key that was ever committed) |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | runtime | yes | Gemini: transcription, embeddings, analysis |
+| `GROQ_API_KEY` | runtime | for chat | Groq chat completions; required for chat/search surfaces |
+| `ASSEMBLYAI_API_KEY` | runtime | optional | Alternative transcription provider |
+| `YOUTUBE_API_KEY` | runtime | optional | Richer YouTube metadata |
+| `GEMINI_FLASH_MODEL` / `GEMINI_EMBEDDING_MODEL` / `GROQ_CHAT_MODEL` | runtime | optional | Pin model IDs (alive defaults baked in) |
+| `MATCH_THRESHOLD` | runtime | optional | Retrieval similarity floor, default 0.5 |
+| `EMBEDDING_DIMENSIONS` | runtime | optional | Vector size; 768 keeps pgvector + RPCs compatible |
+| `MAX_VIDEO_DURATION_MINUTES` | runtime | optional | Default 30 |
+| `TEMP_DIR` | runtime | optional | Scratch dir for media temp files, default `/tmp` |
+| `WEBHOOK_TOLERANCE_SECONDS` | runtime | optional | Webhook replay window, default 300 |
+| `NEXT_PUBLIC_APP_URL` | build | optional | Bare deployment hostname (no scheme) for canonical/OG URLs |
+
+Full API contract, quickstart, webhook signature scheme, and MCP config live on
+the deployed app at `/docs`.

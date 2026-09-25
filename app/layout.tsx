@@ -8,8 +8,9 @@ const defaultUrl = process.env.NEXT_PUBLIC_APP_URL
 
 export const metadata = {
   metadataBase: new URL(defaultUrl),
-  title: "Video RAG System",
-  description: "AI-powered video analysis and chat system",
+  title: "Video RAG — evidence review that answers to the second",
+  description:
+    "Ingest footage or a YouTube link and get timestamped transcription, verbatim citations to the exact second, chain-of-custody manifests, and an async API v1 with signed webhooks.",
 };
 
 export default function RootLayout({
