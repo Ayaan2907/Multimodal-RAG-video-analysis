@@ -284,16 +284,26 @@ export async function createEmbedding(data: {
   }
 }
 
-export async function getVideoWithDetails(videoId: string): Promise<VideoWithDetails | null> {
+// organizationId, when provided, scopes the read to that org's videos (404 for
+// foreign videos — existence is not disclosed across orgs).
+export async function getVideoWithDetails(
+  videoId: string,
+  organizationId?: string
+): Promise<VideoWithDetails | null> {
   try {
     const supabase = getSupabaseAdmin()
 
     // Fetch video
-    const { data: video, error: videoError } = await supabase
+    let videoQuery = supabase
       .from('videos')
       .select('*')
       .eq('id', videoId)
-      .single()
+
+    if (organizationId) {
+      videoQuery = videoQuery.eq('organization_id', organizationId)
+    }
+
+    const { data: video, error: videoError } = await videoQuery.single()
 
     if (videoError || !video) {
       console.error('Error fetching video:', videoError)
