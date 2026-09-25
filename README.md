@@ -57,3 +57,53 @@ All routes require `Authorization: Bearer vidrag_sk_…`.
 | `POST /api/youtube/extract` | `ingest:write` | Start processing a YouTube URL |
 | `GET /api/videos/{id}/status` | `library:read` | Processing status/progress |
 | `POST /api/chat` | `chat:run` | Ask a video a question; returns answer + timestamped sources |
+
+
+## MCP server
+
+An MCP server exposes the API v1 surface to coding agents (`mcp/`). It is a
+thin client of API v1 — every tool call is one authenticated HTTP request; it
+holds no database access and no pipeline logic of its own.
+
+- **Tools:** `ingest_video`, `get_video`, `search`, `ask_video`, `get_transcript`
+- **Resource:** `video://{videoId}/transcript` — the timestamped markdown transcript
+
+Configure it with two environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `VIDEO_RAG_API_URL` | API origin, e.g. `https://api.example.com` |
+| `VIDEO_RAG_API_KEY` | Organization API key (`vidrag_sk_…`) |
+
+Run over stdio (this is what an MCP client invokes):
+
+```bash
+VIDEO_RAG_API_URL=https://api.example.com VIDEO_RAG_API_KEY=vidrag_sk_… bun run mcp
+```
+
+Or in an MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "video-rag": {
+      "command": "bun",
+      "args": ["run", "mcp"],
+      "env": {
+        "VIDEO_RAG_API_URL": "https://api.example.com",
+        "VIDEO_RAG_API_KEY": "vidrag_sk_…"
+      }
+    }
+  }
+}
+```
+
+Smoke-test it against fixture data (no Supabase or AI keys needed) — start the
+fixture API v1 server, then drive the MCP server with the inspector:
+
+```bash
+bun run mcp:fixtures   # fixture API v1 on http://127.0.0.1:8977
+npx -y @modelcontextprotocol/inspector --cli bun run mcp \
+  --method tools/call --tool-name ask_video \
+  --tool-arg video_id=vid_fixture_001 --tool-arg message="When was the contract signed?"
+```

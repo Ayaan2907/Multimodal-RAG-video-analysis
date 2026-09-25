@@ -96,8 +96,24 @@ describe('buildSkillPackageZip', () => {
     const zip = buildSkillPackageZip({ video: { ...VIDEO, title: '???' } })
     expect(strFromU8(unzipSync(zip)['SKILL.md'])).toContain('name: video-evidence')
   })
-})
 
+  it('quotes the frontmatter description so titles with colons and quotes stay valid YAML', () => {
+    const zip = buildSkillPackageZip({ video: { ...VIDEO, title: 'Q&A: "Cross" exam \\ day 1' } })
+    const skillMd = strFromU8(unzipSync(zip)['SKILL.md'])
+    const descriptionLine = skillMd
+      .split('\n')
+      .find(line => line.startsWith('description: '))
+    // Double-quoted scalar: no bare colon outside quotes; inner quotes and
+    // Round-trip check: the value is a YAML double-quoted scalar — strip the
+    // outer quotes, unescape (\" → ", \\ → \), and it must equal the plain
+    // description built from the title.
+    expect(descriptionLine?.startsWith('description: "') && descriptionLine.endsWith('"')).toBe(true)
+    const quoted = descriptionLine!.slice('description: '.length + 1, -1)
+    expect(quoted.replace(/\\(.)/g, '$1')).toBe(
+      'Timestamped transcript evidence for the video "Q&A: "Cross" exam \\ day 1".',
+    )
+  })
+})
 describe('buildSkillPackageFiles', () => {
   it('is deterministic for identical input (no clock dependency)', () => {
     expect(buildSkillPackageFiles(BASE_INPUT)).toEqual(buildSkillPackageFiles(BASE_INPUT))
