@@ -11,7 +11,8 @@
 
 import { execSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const TEXT_EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '.md', '.sql',
@@ -19,6 +20,10 @@ const TEXT_EXTENSIONS = new Set([
 ])
 const MAX_FILE_BYTES = 1024 * 1024
 const ALLOWED_FILES = new Set(['bun.lock', 'package-lock.json', 'pnpm-lock.yaml'])
+
+// The scanner's own source embeds the tripwire literals it matches, so it must
+// exclude itself from the scan.
+const SELF_PATH = relative(process.cwd(), fileURLToPath(import.meta.url))
 
 // High-signal credential patterns. Snippets are never printed in full.
 const PATTERNS = [
@@ -45,6 +50,7 @@ try {
 const findings = []
 
 for (const file of trackedFiles) {
+  if (file === SELF_PATH) continue
   if (ALLOWED_FILES.has(file)) continue
   const ext = file.slice(file.lastIndexOf('.')).toLowerCase()
   if (!TEXT_EXTENSIONS.has(ext)) continue
