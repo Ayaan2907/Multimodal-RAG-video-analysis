@@ -2,8 +2,9 @@
 
 import { useState, FormEvent, useRef, useEffect } from 'react'
 import { VideoWithDetails } from '@/lib/supabase/database'
-import { MessageCircle, Bot, User, Send, CornerDownLeft, ExternalLink, Zap } from 'lucide-react'
+import { MessageCircle, Bot, User, Send, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils' // Assuming you have a cn utility for classnames
+import { authedFetch } from '@/lib/client/api-key'
 
 // Interfaces for chat message structure
 interface ChatSource {
@@ -59,7 +60,7 @@ export function ChatInterface({ video, onSourceClick }: ChatInterfaceProps) {
     setError(null)
 
     try {
-      const response = await fetch('/api/chat', {
+      const response = await authedFetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

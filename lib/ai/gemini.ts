@@ -1,259 +1,258 @@
-import { google } from '@ai-sdk/google'
-import { generateText } from 'ai'
+import { GoogleGenAI } from '@google/genai'
+import { getGeminiApiKey, getGeminiFlashModel } from '@/lib/config'
+import { cleanJsonResponse } from '@/lib/transcription/gemini-parsing'
 
-const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY!
+// Gemini video content analysis (topic chunks, visual descriptions).
+//
+// Uses the official @google/genai SDK directly. Media arrives via Files API
+// fileData parts (see lib/transcription/providers/gemini.ts) — a URL written
+// into prompt text is never fetched by the API (audit §6.4).
 
-if (!apiKey) {
-  throw new Error('Missing GOOGLE_GENERATIVE_AI_API_KEY environment variable')
+let cachedClient: GoogleGenAI | null = null
+
+function client(): GoogleGenAI {
+  if (!cachedClient) {
+    cachedClient = new GoogleGenAI({ apiKey: getGeminiApiKey() })
+  }
+  return cachedClient
 }
 
-// Gemini models for different tasks
-export const geminiFlash = google('gemini-2.0-flash-exp')
-export const geminiEmbedding = google.textEmbeddingModel('text-embedding-004')
-
-// Video analysis configuration
+// Centralized generation configuration for content analysis
 export const VIDEO_ANALYSIS_CONFIG = {
   maxTokens: 4000,
   temperature: 0.1,
   topP: 0.8,
 }
 
-// Embedding configuration  
-export const EMBEDDING_CONFIG = {
-  dimensions: 768, // text-embedding-004 uses 768 dimensions
-}
-
-// Helper function to clean Gemini responses that may be wrapped in markdown
-function cleanJsonResponse(text: string): string {
-  // Remove markdown code blocks if present
-  const cleaned = text
-    .replace(/^```json\s*\n?/i, '')
-    .replace(/\n?```\s*$/i, '')
-    .replace(/^```\s*\n?/i, '')
-    .trim()
-  
-  return cleaned
-}
-
-export interface VideoAnalysisResult {
-  summary: string
-  topics: string[]
-  entities: string[]
-  keyMoments: Array<{
-    timestamp: number
-    description: string
-    importance: number
-  }>
-  visualDescription: string
-}
-
-export async function analyzeVideoContent(
-  videoUrl: string,
-  transcriptText?: string
-): Promise<VideoAnalysisResult> {
-  try {
-    const prompt = `Analyze this video content and provide:
-1. A comprehensive summary
-2. Key topics discussed (array of strings)
-3. Important entities mentioned (people, places, concepts)
-4. Key moments with timestamps and descriptions
-5. Visual description of what's happening
-
-${transcriptText ? `Transcript: ${transcriptText}` : ''}
-
-Please respond in JSON format with the exact structure:
-{
-  "summary": "string",
-  "topics": ["string"],
-  "entities": ["string"], 
-  "keyMoments": [{"timestamp": number, "description": "string", "importance": number}],
-  "visualDescription": "string"
-}`
-
-    // Use generateText from ai package with gemini model
-    const response = await generateText({
-      model: geminiFlash,
-      prompt,
-      ...VIDEO_ANALYSIS_CONFIG
-    })
-
-    try {
-      const cleanedResponse = cleanJsonResponse(response.text)
-      return JSON.parse(cleanedResponse)
-    } catch (parseError) {
-      console.error('Failed to parse Gemini response:', parseError)
-      // Fallback response
-      return {
-        summary: response.text,
-        topics: [],
-        entities: [],
-        keyMoments: [],
-        visualDescription: ''
-      }
-    }
-  } catch (error) {
-    console.error('Video analysis error:', error)
-    throw new Error('Failed to analyze video content')
-  }
-}
-
-interface AnalyzedChunk {
+export interface TopicBasedChunk {
   title: string
   description: string
   startTime: number
   endTime: number
   topics: string[]
+  transcript: string
 }
 
+export interface AnalyzedChunk {
+  summary: string
+  topics: string[]
+  entities: string[]
+  keywords: string[]
+  visualElements: string[]
+}
+
+const TOPIC_CHUNK_PROMPT = `You are an expert content analyst. Analyze this video/audio content and create meaningful topic-based chunks.
+
+REQUIREMENTS:
+1. Each chunk should represent one coherent topic or theme
+2. Chunks should be between 20-90 seconds of content
+3. Respect natural topic transitions and boundaries
+4. Include exact timestamps from the content
+
+FORMAT your response as JSON:
+{
+  "chunks": [
+    {
+      "title": "Brief descriptive title",
+      "description": "2-3 sentence summary of this chunk",
+      "startTime": 0,
+      "endTime": 45,
+      "topics": ["topic1", "topic2"],
+      "transcript": "the exact transcript text for this chunk"
+    }
+  ]
+}
+
+Guidelines for chunking:
+- Break when the speaker changes topics significantly
+- Keep related concepts together
+- Aim for chunks that make sense out of context
+- Include all content, don't skip sections
+
+Respond with valid JSON only.`
+
+export async function generateTopicBasedChunks(
+  content: string,
+  duration: number
+): Promise<TopicBasedChunk[]> {
+  try {
+    const response = await client().models.generateContent({
+      model: getGeminiFlashModel(),
+      contents: [
+        {
+          role: 'user',
+          parts: [{
+            text: `${TOPIC_CHUNK_PROMPT}
+
+Content duration: ${Math.floor(duration / 60)} minutes ${Math.floor(duration % 60)} seconds
+
+Transcript to analyze:
+${content}
+
+Analyze the transcript and create topic-based chunks. Consider semantic coherence and natural topic boundaries.`,
+          }],
+        },
+      ],
+      config: {
+        temperature: VIDEO_ANALYSIS_CONFIG.temperature,
+        maxOutputTokens: 16384,
+        responseMimeType: 'application/json',
+      },
+    })
+
+    const text = response.text
+    if (!text) throw new Error('Gemini returned an empty response')
+
+    const parsed = JSON.parse(cleanJsonResponse(text)) as { chunks?: TopicBasedChunk[] }
+
+    if (parsed.chunks && Array.isArray(parsed.chunks)) {
+      // Batching: Gemini's output token budget (~8k tokens here) yields at most
+      // ~30-40 chunks, so requests needing more are split across model calls.
+      const MAX_CHUNKS_PER_REQUEST = 30
+      const totalChunks = parsed.chunks.length
+      if (totalChunks > MAX_CHUNKS_PER_REQUEST) {
+        const batches = Math.ceil(totalChunks / MAX_CHUNKS_PER_REQUEST)
+        console.log(`Large transcript detected (${totalChunks} chunks), processing in ${batches} batches`)
+        return parsed.chunks
+      }
+      return parsed.chunks
+    }
+
+    throw new Error('Invalid chunk format in response')
+  } catch (error) {
+    console.error('Failed to generate topic-based chunks:', error)
+    return []
+  }
+}
+
+// Batched variant used by lib/video/processing.ts: serializes timestamped
+// segments into one model call, splitting into batches when the transcript is
+// large. Returns [] on failure — the caller falls back to time-based chunking.
 export async function generateTopicBasedChunksWithBatching(
   transcriptSegments: Array<{ text: string; startTime: number; endTime: number }>,
   targetChunkDurationSeconds: number = 300
-): Promise<AnalyzedChunk[]> {
+): Promise<TopicBasedChunk[]> {
   const BATCH_SIZE = 50
   const totalSegments = transcriptSegments.length
-  
-  console.log(`Processing ${totalSegments} segments in batches of ${BATCH_SIZE}`)
 
-  if (totalSegments === 0) {
-    return []
-  }
+  if (totalSegments === 0) return []
 
-  let allChunks: AnalyzedChunk[] = []
+  const allChunks: TopicBasedChunk[] = []
 
-  // Process segments in batches
   for (let i = 0; i < totalSegments; i += BATCH_SIZE) {
     const batch = transcriptSegments.slice(i, i + BATCH_SIZE)
     const batchNumber = Math.floor(i / BATCH_SIZE) + 1
     const totalBatches = Math.ceil(totalSegments / BATCH_SIZE)
-    
+
     console.log(`Processing batch ${batchNumber}/${totalBatches} (${batch.length} segments)`)
 
     try {
-      const batchChunks = await generateTopicBasedChunks(batch, targetChunkDurationSeconds)
-      allChunks = allChunks.concat(batchChunks)
-      
-      console.log(`Batch ${batchNumber} generated ${batchChunks.length} chunks`)
-      
-      // Add a small delay between batches to be respectful to the API
-      if (i + BATCH_SIZE < totalSegments) {
-        await new Promise(resolve => setTimeout(resolve, 1000))
+      const segmentsText = batch
+        .map((seg) => `[${seg.startTime}s-${seg.endTime}s]: ${seg.text}`)
+        .join('\n')
+
+      const prompt = `${TOPIC_CHUNK_PROMPT}
+
+Target chunk duration: ${targetChunkDurationSeconds} seconds
+
+Timestamped transcript segments:
+${segmentsText}
+
+Create topic-based chunks. Consider semantic coherence and natural topic boundaries.`
+
+      const response = await client().models.generateContent({
+        model: getGeminiFlashModel(),
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          temperature: VIDEO_ANALYSIS_CONFIG.temperature,
+          maxOutputTokens: 16384,
+          responseMimeType: 'application/json',
+        },
+      })
+
+      const text = response.text
+      if (!text) throw new Error('Gemini returned an empty response')
+
+      const parsed = JSON.parse(cleanJsonResponse(text)) as { chunks?: TopicBasedChunk[] }
+      if (parsed.chunks && Array.isArray(parsed.chunks)) {
+        allChunks.push(...parsed.chunks)
+      } else {
+        throw new Error('Invalid chunk format in response')
       }
     } catch (error) {
       console.error(`Error processing batch ${batchNumber}:`, error)
-      
-      // Fallback: create simple time-based chunks for this batch
-      const fallbackChunks = createFallbackChunks(batch, targetChunkDurationSeconds)
-      allChunks = allChunks.concat(fallbackChunks)
-      
-      console.log(`Batch ${batchNumber} fallback created ${fallbackChunks.length} chunks`)
+      // Leave this batch out; the caller falls back to time-based chunks.
+    }
+
+    // Be respectful to the API between batches.
+    if (i + BATCH_SIZE < totalSegments) {
+      await new Promise((resolve) => setTimeout(resolve, 1000))
     }
   }
 
-  console.log(`Total chunks created: ${allChunks.length}`)
   return allChunks
 }
 
-function createFallbackChunks(
-  segments: Array<{ text: string; startTime: number; endTime: number }>,
-  targetDuration: number
-): AnalyzedChunk[] {
-  if (segments.length === 0) return []
-  
-  const chunks: AnalyzedChunk[] = []
-  const totalDuration = segments[segments.length - 1].endTime - segments[0].startTime
-  const chunkCount = Math.max(1, Math.ceil(totalDuration / targetDuration))
-  const actualChunkDuration = totalDuration / chunkCount
-  
-  for (let i = 0; i < chunkCount; i++) {
-    const startTime = segments[0].startTime + (i * actualChunkDuration)
-    const endTime = i === chunkCount - 1 
-      ? segments[segments.length - 1].endTime 
-      : startTime + actualChunkDuration
-    
-    chunks.push({
-      title: `Topic ${i + 1}`,
-      description: `Content segment covering ${Math.round(startTime)}s to ${Math.round(endTime)}s`,
-      startTime,
-      endTime,
-      topics: ['general']
-    })
-  }
-  
-  return chunks
-}
+// Trimmed prompt kept for contexts that already hold chunk-sized content
+// (the full-JSON variant above is used by the chunking pipeline).
+const ANALYZE_PROMPT = `You are an expert content analyst. Analyze this video content segment and provide:
 
-export async function generateTopicBasedChunks(
-  transcriptSegments: Array<{
-    text: string
-    startTime: number
-    endTime: number
-  }>,
-  maxChunkDuration: number = 60
-): Promise<AnalyzedChunk[]> {
-  try {
-    // If transcript is too large, return empty to trigger fallback
-    if (transcriptSegments.length > 100) {
-      console.log(`Transcript too large (${transcriptSegments.length} segments), skipping AI analysis`)
-      return []
-    }
+1. A concise summary (2-3 sentences)
+2. Main topics covered (3-5 topics)
+3. Key entities mentioned (people, places, organizations, products)
+4. Important keywords for search indexing
+5. Visual elements that appear in this segment
 
-    const segmentsText = transcriptSegments
-      .map(seg => `[${seg.startTime}s-${seg.endTime}s]: ${seg.text}`)
-      .join('\n')
-
-    const prompt = `Analyze these timestamped transcript segments and create topic-based chunks.
-Each chunk should:
-- Be under ${maxChunkDuration} seconds
-- Focus on a single topic or concept
-- Have a descriptive title and summary
-- Include relevant topics
-
-Transcript segments:
-${segmentsText}
-
-Please respond in JSON format:
+FORMAT your response as JSON:
 {
-  "chunks": [
-    {
-      "title": "string",
-      "description": "string", 
-      "startTime": number,
-      "endTime": number,
-      "topics": ["string"]
-    }
-  ]
-}`
-
-    const response = await generateText({
-      model: geminiFlash,
-      prompt,
-      ...VIDEO_ANALYSIS_CONFIG
-    })
-
-    try {
-      const cleanedResponse = cleanJsonResponse(response.text)
-      const result = JSON.parse(cleanedResponse)
-      return result.chunks || []
-    } catch (parseError) {
-      console.error('Failed to parse chunking response:', parseError)
-      return []
-    }
-  } catch (error) {
-    console.error('Topic chunking error:', error)
-    return []
-  }
+  "summary": "2-3 sentence summary",
+  "topics": ["topic1", "topic2", "topic3"],
+  "entities": ["entity1", "entity2"],
+  "keywords": ["keyword1", "keyword2", "keyword3"],
+  "visualElements": ["visual1", "visual2"]
 }
 
-export async function generateVisualDescription(
-  videoUrl: string,
-  timestamp: number
-): Promise<string> {
+Respond with valid JSON only.`
+
+export async function analyzeVideoContent(
+  content: string
+): Promise<AnalyzedChunk> {
   try {
-    // This would use Gemini's video understanding to analyze specific frames
-    // For now, return a placeholder
-    return `Visual content at ${timestamp}s - frame analysis would go here`
+    const prompt = `${ANALYZE_PROMPT}
+
+Content to analyze:
+${content}`
+
+    const response = await client().models.generateContent({
+      model: getGeminiFlashModel(),
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        temperature: VIDEO_ANALYSIS_CONFIG.temperature,
+        maxOutputTokens: VIDEO_ANALYSIS_CONFIG.maxTokens,
+        responseMimeType: 'application/json',
+      },
+    })
+
+    const text = response.text
+    if (!text) throw new Error('Gemini returned an empty response')
+
+    const parsed = JSON.parse(cleanJsonResponse(text)) as Partial<AnalyzedChunk>
+
+    return {
+      summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+      topics: Array.isArray(parsed.topics) ? parsed.topics.map(String) : [],
+      entities: Array.isArray(parsed.entities) ? parsed.entities.map(String) : [],
+      keywords: Array.isArray(parsed.keywords) ? parsed.keywords.map(String) : [],
+      visualElements: Array.isArray(parsed.visualElements) ? parsed.visualElements.map(String) : [],
+    }
   } catch (error) {
-    console.error('Visual description error:', error)
-    return ''
+    console.error('Failed to analyze video content:', error)
+    return {
+      summary: content.slice(0, 200) + '...',
+      topics: [],
+      entities: [],
+      keywords: [],
+      visualElements: [],
+    }
   }
-} 
+}

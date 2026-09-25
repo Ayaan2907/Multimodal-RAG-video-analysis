@@ -43,7 +43,7 @@ export function VideoMetadata({ video }: VideoMetadataProps) {
           <span className="capitalize">{video.source_type}</span>
         </div>
 
-        {video.metadata?.channelTitle && (
+        {typeof video.metadata?.channelTitle === 'string' && (
           <div className="flex items-center gap-1">
             <User className="h-4 w-4" />
             <span>{video.metadata.channelTitle}</span>

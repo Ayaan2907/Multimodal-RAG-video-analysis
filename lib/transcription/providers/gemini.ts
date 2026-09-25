@@ -1,22 +1,24 @@
-import { google } from '@ai-sdk/google'
-import { generateText } from 'ai'
-import { createClient } from '@supabase/supabase-js'
+import { GoogleGenAI } from '@google/genai'
 import { promises as fs } from 'fs'
+import { getSupabaseAdmin } from '@/lib/supabase/admin'
+import { getGeminiFlashModel } from '@/lib/config'
+import {
+  mimeTypeFromExtension,
+  parseChunkedResponse,
+  parseTimestampedTranscript,
+  type GeminiChunk,
+} from '../gemini-parsing'
 import { TranscriptionProvider, TranscriptSegment, TranscriptionOptions } from '../types'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+// Gemini transcription + video understanding provider.
+//
+// Media attachment design (fixes audit §6.4): media reaches Gemini as a proper
+// Files API `fileData` part — never as a URL string in the prompt text, which
+// the API does not fetch. Local files and private-bucket objects are uploaded
+// to the Files API (polled until ACTIVE); public YouTube URLs are passed as
+// fileData directly, which the API fetches natively.
 
-export interface GeminiChunk {
-  title: string
-  description: string
-  startTime: number
-  endTime: number
-  topics: string[]
-  transcript: string
-}
+export type { GeminiChunk }
 
 export interface VideoEmbeddingResult {
   description: string
@@ -26,8 +28,8 @@ export interface VideoEmbeddingResult {
 
 export interface VideoSource {
   type: 'upload' | 'youtube'
-  path?: string  // For uploads: storage path
-  url?: string   // For YouTube: video URL
+  path?: string // For uploads: storage path
+  url?: string // For YouTube: video URL
 }
 
 export interface VideoSegmentRequest {
@@ -37,45 +39,48 @@ export interface VideoSegmentRequest {
   frameCount?: number
 }
 
+interface AttachedMedia {
+  fileUri: string
+  mimeType: string
+}
+
+const FILE_STATE_POLL_INTERVAL_MS = 2000
+const FILE_STATE_TIMEOUT_MS = 5 * 60 * 1000
+
 export class GeminiProvider implements TranscriptionProvider {
   name = 'gemini'
-  private model = google('gemini-2.0-flash-exp')
-  
+  private ai: GoogleGenAI
+  private modelId: string
+  // Uploaded Files-API media cached per source so per-chunk embedding calls
+  // reuse one upload instead of re-uploading the whole video for each chunk.
+  private uploadedMedia = new Map<string, AttachedMedia>()
+
   constructor(apiKey: string) {
     if (!apiKey) {
       throw new Error('Google API key is required')
     }
-    // API key is handled by @ai-sdk/google via GOOGLE_API_KEY env var
+    this.ai = new GoogleGenAI({ apiKey })
+    this.modelId = getGeminiFlashModel()
   }
 
   async transcribe(audioUrl: string, options?: TranscriptionOptions): Promise<TranscriptSegment[]> {
     try {
-      console.log(`Starting Gemini transcription for URL: ${audioUrl}`)
-      
-      // Create transcription prompt with timestamps
-      const prompt = `Please transcribe this audio file with precise timestamps. 
-      Format each segment as: [START_TIME-END_TIME] TEXT
-      Where times are in seconds (e.g., [0.0-2.5] Hello world).
-      Provide word-level or phrase-level timestamps for accurate segmentation.
-      Include all spoken content with punctuation.
-      
-      Audio URL: ${audioUrl}`
-      
-      const response = await generateText({
-        model: this.model,
-        prompt,
-        maxTokens: 4000,
-        temperature: 0.1
-      })
-      
-      console.log('Gemini transcription completed')
-      
-      // Parse the timestamped transcript
-      return this.parseTimestampedTranscript(response.text)
-      
+      const prompt = [
+        'Please transcribe this audio file with precise timestamps.',
+        'Format each segment as: [START_TIME-END_TIME] TEXT',
+        'Where times are in seconds (e.g., [0.0-2.5] Hello world).',
+        'Provide word-level or phrase-level timestamps for accurate segmentation.',
+        'Include all spoken content with punctuation.',
+        options?.language ? `Transcription language: ${options.language}.` : '',
+      ]
+        .filter(Boolean)
+        .join('\n')
+
+      const text = await this.generateFromMediaUrl(audioUrl, prompt)
+      return parseTimestampedTranscript(text)
     } catch (error) {
       console.error('Gemini transcription error:', error)
-      
+
       if (error instanceof Error) {
         if (error.message.includes('API key') || error.message.includes('quota')) {
           throw new Error('Gemini API key invalid, expired, or quota exceeded')
@@ -83,100 +88,37 @@ export class GeminiProvider implements TranscriptionProvider {
           throw new Error('Audio file format not supported or corrupted')
         }
       }
-      
+
       throw new Error(`Gemini transcription failed: ${error instanceof Error ? error.message : 'Unknown error'}`)
     }
   }
 
   async transcribeFile(filePath: string, options?: TranscriptionOptions): Promise<TranscriptSegment[]> {
-    let audioFileName: string | null = null
-    
     try {
-      console.log(`Starting Gemini file transcription for: ${filePath}`)
-      
-      // Upload audio file to Supabase storage
-      audioFileName = `audio_gemini_${Date.now()}.mp3`
-      const audioBuffer = await fs.readFile(filePath)
-      
-      const { data, error } = await supabase.storage
-        .from('audio-files')
-        .upload(audioFileName, audioBuffer, {
-          contentType: 'audio/mpeg',
-          cacheControl: '3600'
-        })
+      const media = await this.uploadLocalFile(filePath)
+      const prompt = [
+        'Please transcribe this audio file with precise timestamps.',
+        'Format each segment as: [START_TIME-END_TIME] TEXT',
+        'Where times are in seconds (e.g., [0.0-2.5] Hello world).',
+        'Include all spoken content with punctuation.',
+        options?.language ? `Transcription language: ${options.language}.` : '',
+      ]
+        .filter(Boolean)
+        .join('\n')
 
-      if (error) {
-        throw new Error(`Storage upload failed: ${error.message}`)
-      }
-
-      // Get public URL
-      const { data: urlData } = supabase.storage
-        .from('audio-files')
-        .getPublicUrl(audioFileName)
-
-      if (!urlData.publicUrl) {
-        throw new Error('Failed to get public URL for uploaded audio')
-      }
-
-      console.log(`Audio uploaded to storage: ${urlData.publicUrl}`)
-      
-      // Use the URL-based transcription
-      const segments = await this.transcribe(urlData.publicUrl, options)
-      
-      return segments
-      
+      const text = await this.generateFromAttachedMedia(media, prompt)
+      return parseTimestampedTranscript(text)
     } catch (error) {
       console.error('Gemini file transcription error:', error)
       throw error
-    } finally {
-      // Clean up storage file
-      if (audioFileName) {
-        try {
-          await supabase.storage
-            .from('audio-files')
-            .remove([audioFileName])
-          console.log(`Cleaned up audio file from storage: ${audioFileName}`)
-        } catch (cleanupError) {
-          console.warn(`Failed to cleanup audio file ${audioFileName}:`, cleanupError)
-        }
-      }
     }
   }
 
-  // NEW: Unified transcription and chunking method
+  // Unified transcription + topic chunking in one call over the attached audio.
   async transcribeAndChunk(filePath: string, maxChunkDuration: number = 60): Promise<GeminiChunk[]> {
-    let audioFileName: string | null = null
-    
     try {
-      console.log(`Starting unified Gemini transcription and chunking for: ${filePath}`)
-      
-      // Upload audio file to Supabase storage
-      audioFileName = `audio_gemini_${Date.now()}.mp3`
-      const audioBuffer = await fs.readFile(filePath)
-      
-      const { data, error } = await supabase.storage
-        .from('audio-files')
-        .upload(audioFileName, audioBuffer, {
-          contentType: 'audio/mpeg',
-          cacheControl: '3600'
-        })
+      const media = await this.uploadLocalFile(filePath)
 
-      if (error) {
-        throw new Error(`Storage upload failed: ${error.message}`)
-      }
-
-      // Get public URL
-      const { data: urlData } = supabase.storage
-        .from('audio-files')
-        .getPublicUrl(audioFileName)
-
-      if (!urlData.publicUrl) {
-        throw new Error('Failed to get public URL for uploaded audio')
-      }
-
-      console.log(`Audio uploaded to storage: ${urlData.publicUrl}`)
-      
-      // Unified prompt for transcription and chunking
       const prompt = `Analyze this audio file and create meaningful topic-based chunks with transcriptions.
 
 REQUIREMENTS:
@@ -192,60 +134,30 @@ FORMAT your response as JSON:
   "chunks": [
     {
       "title": "Descriptive title of this segment",
-      "description": "Brief summary of what's discussed", 
+      "description": "Brief summary of what's discussed",
       "startTime": 0.0,
       "endTime": 45.2,
       "topics": ["topic1", "topic2"],
       "transcript": "Full transcript text for this time segment"
     }
   ]
-}
+}`
 
-Audio URL: ${urlData.publicUrl}`
-      
-      const response = await generateText({
-        model: this.model,
-        prompt,
-        maxTokens: 10000,
-        temperature: 0.1
-      })
-      
-      console.log(' Gemini transcription and chunking completed')
-      
-      // Parse the JSON response
-      const chunks = this.parseChunkedResponse(response.text)
-      
-      return chunks
-      
+      const text = await this.generateFromAttachedMedia(media, prompt, { json: true })
+      return parseChunkedResponse(text)
     } catch (error) {
       console.error('Gemini transcription error:', error)
       throw error
-    } finally {
-      // Clean up storage file
-      if (audioFileName) {
-        try {
-          await supabase.storage
-            .from('audio-files')
-            .remove([audioFileName])
-          console.log(`Cleaned up audio file from storage: ${audioFileName}`)
-        } catch (cleanupError) {
-          console.warn(`Failed to cleanup audio file ${audioFileName}:`, cleanupError)
-        }
-      }
     }
   }
 
-  // NEW: Generate video embeddings for specific segments
+  // Visual description + embedding of a video segment. The whole video is
+  // attached once (cached); the prompt asks the model to focus on the time range.
   async generateVideoEmbedding(request: VideoSegmentRequest): Promise<VideoEmbeddingResult> {
     try {
-      console.log(`Generating video embedding for ${request.source.type} source, ${request.startTime}s-${request.endTime}s`)
-      
-      let prompt: string
-      let mediaInput: any
+      const media = await this.resolveVideoMedia(request.source)
 
-      if (request.source.type === 'youtube' && request.source.url) {
-        // Direct YouTube processing
-        prompt = `Analyze this YouTube video segment from ${request.startTime} to ${request.endTime} seconds.
+      const prompt = `Analyze this video, focusing ONLY on the segment from ${request.startTime} to ${request.endTime} seconds.
 
 Provide a detailed description of:
 1. Visual elements (objects, people, scenes, actions)
@@ -253,165 +165,149 @@ Provide a detailed description of:
 3. Key visual themes or concepts
 4. Any text or graphics visible
 
-Focus on visual content that would be useful for search and understanding.
+Focus on visual content that would be useful for search and understanding.`
 
-YouTube URL: ${request.source.url}
-Time segment: ${request.startTime}s - ${request.endTime}s`
+      const description = await this.generateFromAttachedMedia(media, prompt)
 
-        mediaInput = request.source.url
-
-      } else if (request.source.type === 'upload' && request.source.path) {
-        // Upload video processing via storage URL
-        const { data: urlData } = supabase.storage
-          .from('videos')
-          .getPublicUrl(request.source.path)
-
-        if (!urlData.publicUrl) {
-          throw new Error('Failed to get public URL for uploaded video')
-        }
-
-        prompt = `Analyze this video segment from ${request.startTime} to ${request.endTime} seconds.
-
-Provide a detailed description of:
-1. Visual elements (objects, people, scenes, actions)  
-2. Context and setting
-3. Key visual themes or concepts
-4. Any text or graphics visible
-
-Focus on visual content that would be useful for search and understanding.
-
-Video URL: ${urlData.publicUrl}
-Time segment: ${request.startTime}s - ${request.endTime}s
-${request.frameCount ? `Analyze approximately ${request.frameCount} key frames from this segment.` : ''}`
-
-        mediaInput = urlData.publicUrl
-
-      } else {
-        throw new Error('Invalid video source configuration')
-      }
-
-      // Generate video understanding with Gemini
-      const response = await generateText({
-        model: this.model,
-        prompt,
-        maxTokens: 2000,
-        temperature: 0.1
-      })
-
-      // Generate embedding from the visual description
       const { generateTextEmbedding } = await import('@/lib/ai/embeddings')
-      const embeddingResult = await generateTextEmbedding(response.text)
+      const embeddingResult = await generateTextEmbedding(description)
 
       if (embeddingResult.error) {
         throw new Error(`Embedding generation failed: ${embeddingResult.error}`)
       }
 
       return {
-        description: response.text,
+        description,
         embedding: embeddingResult.embedding,
-        confidence: 0.9 // Gemini confidence placeholder
+        confidence: 0.9, // Gemini doesn't return per-description confidence; documented placeholder
       }
-
     } catch (error) {
       console.error('Video embedding generation error:', error)
       throw new Error(`Failed to generate video embedding: ${error instanceof Error ? error.message : 'Unknown error'}`)
     }
   }
 
-  private parseChunkedResponse(responseText: string): GeminiChunk[] {
-    try {
-      // Clean JSON response (remove markdown if present)
-      const cleanedResponse = responseText
-        .replace(/^```json\s*\n?/i, '')
-        .replace(/\n?```\s*$/i, '')
-        .replace(/^```\s*\n?/i, '')
-        .trim()
-      
-      const parsed = JSON.parse(cleanedResponse)
-      
-      if (parsed.chunks && Array.isArray(parsed.chunks)) {
-        return parsed.chunks.map((chunk: any) => ({
-          title: chunk.title || 'Untitled Segment',
-          description: chunk.description || '',
-          startTime: parseFloat(chunk.startTime) || 0,
-          endTime: parseFloat(chunk.endTime) || 0,
-          topics: Array.isArray(chunk.topics) ? chunk.topics : [],
-          transcript: chunk.transcript || ''
-        }))
-      }
-      
-      throw new Error('Invalid chunk format in response')
-    } catch (error) {
-      console.error('Failed to parse chunked response:', error)
-      // Fallback: return empty array to trigger fallback chunking
-      return []
+  // ---- media plumbing -------------------------------------------------------
+
+  private async generateFromMediaUrl(url: string, prompt: string, opts?: { json?: boolean }): Promise<string> {
+    if (/^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\//i.test(url)) {
+      // Gemini fetches public YouTube URLs natively when passed as fileData.
+      return this.generateFromAttachedMedia({ fileUri: url, mimeType: 'video/mp4' }, prompt, opts)
     }
+
+    // Remote media (e.g. storage URLs): fetch the bytes ourselves and attach
+    // them via the Files API. Prompt-text URLs are never fetched by the API.
+    const response = await fetch(url)
+    if (!response.ok) {
+      throw new Error(`Failed to fetch media for Gemini: HTTP ${response.status}`)
+    }
+    const buffer = Buffer.from(await response.arrayBuffer())
+    const mimeType = mimeTypeFromExtension(url, response.headers.get('content-type')?.split(';')[0] || 'application/octet-stream')
+    const media = await this.uploadBuffer(buffer, mimeType, 'remote-media')
+    return this.generateFromAttachedMedia(media, prompt, opts)
   }
 
-  private parseTimestampedTranscript(transcriptText: string): TranscriptSegment[] {
-    const segments: TranscriptSegment[] = []
-    
-    // Look for patterns like [0.0-2.5] text or [0:00-0:02] text (fixed regex)
-    const timestampRegex = /\[(\d+(?:\.\d+)?(?::\d+)?)-(\d+(?:\.\d+)?(?::\d+)?)\]\s*(.+?)(?=\[|$)/g
-    
-    let match
-    while ((match = timestampRegex.exec(transcriptText)) !== null) {
-      const startTime = this.parseTime(match[1])
-      const endTime = this.parseTime(match[2])
-      const text = match[3].trim()
-      
-      if (text && startTime !== null && endTime !== null) {
-        segments.push({
-          text,
-          start: startTime,
-          end: endTime,
-          confidence: 0.95 // Gemini doesn't provide confidence scores
-        })
-      }
+  private async generateFromAttachedMedia(
+    media: AttachedMedia,
+    prompt: string,
+    opts?: { json?: boolean },
+  ): Promise<string> {
+    const response = await this.ai.models.generateContent({
+      model: this.modelId,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { fileData: { fileUri: media.fileUri, mimeType: media.mimeType } },
+            { text: prompt },
+          ],
+        },
+      ],
+      config: {
+        temperature: 0.1,
+        maxOutputTokens: 16384,
+        ...(opts?.json ? { responseMimeType: 'application/json' } : {}),
+      },
+    })
+
+    const text = response.text
+    if (!text) {
+      throw new Error('Gemini returned an empty response')
     }
-    
-    // Fallback: if no timestamps found, try to split by sentences
-    if (segments.length === 0) {
-      console.warn('No timestamps found in Gemini response, creating approximate segments')
-      const sentences = transcriptText.split(/[.!?]+/).filter(s => s.trim())
-      const avgDuration = 3 // Assume 3 seconds per sentence
-      
-      sentences.forEach((sentence, index) => {
-        if (sentence.trim()) {
-          segments.push({
-            text: sentence.trim(),
-            start: index * avgDuration,
-            end: (index + 1) * avgDuration,
-            confidence: 0.8
-          })
-        }
-      })
-    }
-    
-    return segments
+    return text
   }
 
-  private parseTime(timeStr: string): number | null {
-    try {
-      // Handle formats like "1.5" or "1:30"
-      if (timeStr.includes(':')) {
-        const parts = timeStr.split(':')
-        if (parts.length === 2) {
-          return parseInt(parts[0]) * 60 + parseFloat(parts[1])
-        }
-      } else {
-        return parseFloat(timeStr)
+  private async uploadLocalFile(filePath: string): Promise<AttachedMedia> {
+    const buffer = await fs.readFile(filePath)
+    const mimeType = mimeTypeFromExtension(filePath, 'application/octet-stream')
+    return this.uploadBuffer(buffer, mimeType, filePath)
+  }
+
+  private async resolveVideoMedia(source: VideoSource): Promise<AttachedMedia> {
+    const cacheKey = source.type === 'youtube' ? `youtube:${source.url}` : `upload:${source.path}`
+    const cached = this.uploadedMedia.get(cacheKey)
+    if (cached) return cached
+
+    let media: AttachedMedia
+    if (source.type === 'youtube' && source.url) {
+      media = { fileUri: source.url, mimeType: 'video/mp4' }
+    } else if (source.type === 'upload' && source.path) {
+      // Private bucket: mint a short-lived signed URL, fetch bytes, upload once.
+      const { data, error } = await getSupabaseAdmin()
+        .storage
+        .from('videos')
+        .createSignedUrl(source.path, 300)
+
+      if (error || !data?.signedUrl) {
+        throw new Error(`Failed to create signed URL for stored video: ${error?.message ?? 'unknown error'}`)
       }
-    } catch (error) {
-      console.warn(`Failed to parse timestamp: ${timeStr}`)
+
+      const response = await fetch(data.signedUrl)
+      if (!response.ok) {
+        throw new Error(`Failed to fetch stored video for Gemini: HTTP ${response.status}`)
+      }
+      const buffer = Buffer.from(await response.arrayBuffer())
+      media = await this.uploadBuffer(buffer, mimeTypeFromExtension(source.path, 'video/mp4'), source.path)
+    } else {
+      throw new Error('Invalid video source configuration')
     }
-    return null
+
+    this.uploadedMedia.set(cacheKey, media)
+    return media
+  }
+
+  private async uploadBuffer(buffer: Buffer, mimeType: string, displayName: string): Promise<AttachedMedia> {
+    const blob = new Blob([new Uint8Array(buffer)], { type: mimeType })
+    const uploaded = await this.ai.files.upload({
+      file: blob,
+      config: { mimeType, displayName: displayName.split('/').pop()?.slice(0, 40) || 'media' },
+    })
+
+    if (!uploaded.name || !uploaded.uri) {
+      throw new Error('Gemini Files API upload returned no file reference')
+    }
+
+    await this.waitUntilActive(uploaded.name)
+    return { fileUri: uploaded.uri, mimeType: uploaded.mimeType ?? mimeType }
+  }
+
+  private async waitUntilActive(name: string): Promise<void> {
+    const deadline = Date.now() + FILE_STATE_TIMEOUT_MS
+    for (;;) {
+      const file = await this.ai.files.get({ name })
+      if (file.state === 'ACTIVE') return
+      if (file.state === 'FAILED') {
+        throw new Error(`Gemini Files API processing failed for ${name}`)
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`Timed out waiting for Gemini Files API to process ${name}`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, FILE_STATE_POLL_INTERVAL_MS))
+    }
   }
 
   getSupportedFormats(): string[] {
-    return [
-      'mp3', 'mp4', 'wav', 'flac', 'm4a', 'ogg', 'webm'
-    ]
+    return ['mp3', 'mp4', 'wav', 'flac', 'm4a', 'ogg', 'webm']
   }
 
   getMaxFileSize(): number {
@@ -421,4 +317,4 @@ ${request.frameCount ? `Analyze approximately ${request.frameCount} key frames f
   getCostPerHour(): number {
     return 0.00125 // Rough estimate based on Gemini API pricing
   }
-} 
+}

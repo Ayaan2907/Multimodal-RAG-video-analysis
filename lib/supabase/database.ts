@@ -1,5 +1,4 @@
-import { supabaseAdmin } from './admin'
-import { createClient } from './client'
+import { supabaseAdmin, getSupabaseAdmin } from './admin'
 
 export interface VideoRecord {
   id: string
@@ -13,7 +12,7 @@ export interface VideoRecord {
   file_size_bytes?: number
   processing_status: 'uploading' | 'processing' | 'chunking' | 'transcribing' | 'embedding' | 'completed' | 'failed'
   processing_error?: string
-  metadata?: any
+  metadata?: Record<string, unknown>
   created_at: string
   updated_at: string
 }
@@ -51,9 +50,9 @@ export interface VideoChunk {
   end_time_seconds: number
   visual_description?: string
   transcript_text?: string
-  key_frames?: any[]
-  topics?: any[]
-  entities?: any[]
+  key_frames?: unknown[]
+  topics?: string[]
+  entities?: string[]
   created_at: string
 }
 
@@ -72,13 +71,18 @@ export async function createVideoRecord(data: {
   thumbnail_url?: string
   duration_seconds?: number
   file_size_bytes?: number
-  metadata?: any
+  organization_id?: string | null
+  metadata?: Record<string, unknown>
 }): Promise<{ data: VideoRecord | null; error: string | null }> {
   try {
+    const { organization_id, ...rest } = data
     const { data: video, error } = await supabaseAdmin
       .from('videos')
       .insert([{
-        ...data,
+        ...rest,
+        // Videos are organization-scoped when the calling API key belongs to
+        // an org; null (legacy/anonymous) rows stay invisible to org filters.
+        organization_id: organization_id ?? null,
         processing_status: 'uploading'
       }])
       .select()
@@ -105,7 +109,7 @@ export async function updateVideoStatus(
   error?: string
 ): Promise<boolean> {
   try {
-    const updateData: any = { processing_status: status }
+    const updateData: Record<string, unknown> = { processing_status: status }
     if (error) {
       updateData.processing_error = error
     }
@@ -127,13 +131,23 @@ export async function updateVideoStatus(
   }
 }
 
-export async function getVideoById(videoId: string): Promise<VideoRecord | null> {
+// organizationId, when provided, scopes the read to that org's videos (404 for
+// foreign videos — existence is not disclosed across orgs).
+export async function getVideoById(
+  videoId: string,
+  organizationId?: string
+): Promise<VideoRecord | null> {
   try {
-    const { data, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from('videos')
       .select('*')
       .eq('id', videoId)
-      .single()
+
+    if (organizationId) {
+      query = query.eq('organization_id', organizationId)
+    }
+
+    const { data, error } = await query.single()
 
     if (error) {
       console.error('Video fetch error:', error)
@@ -219,9 +233,9 @@ export async function createVideoChunk(data: {
   end_time_seconds: number
   visual_description?: string
   transcript_text?: string
-  key_frames?: any[]
-  topics?: any[]
-  entities?: any[]
+  key_frames?: unknown[]
+  topics?: string[]
+  entities?: string[]
 }): Promise<{ id: string | null; error: string | null }> {
   try {
     const { data: chunk, error } = await supabaseAdmin
@@ -251,7 +265,7 @@ export async function createEmbedding(data: {
   content_type: 'transcript' | 'visual' | 'multimodal'
   content_text: string
   embedding: number[]
-  metadata?: any
+  metadata?: Record<string, unknown>
 }): Promise<boolean> {
   try {
     const { error } = await supabaseAdmin
@@ -272,7 +286,7 @@ export async function createEmbedding(data: {
 
 export async function getVideoWithDetails(videoId: string): Promise<VideoWithDetails | null> {
   try {
-    const supabase = createClient()
+    const supabase = getSupabaseAdmin()
 
     // Fetch video
     const { data: video, error: videoError } = await supabase

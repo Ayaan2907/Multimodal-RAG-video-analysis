@@ -1,5 +1,21 @@
-import { embed } from 'ai'
-import { geminiEmbedding, EMBEDDING_CONFIG } from './gemini'
+import { GoogleGenAI } from '@google/genai'
+import { getEmbeddingDimensions, getGeminiApiKey, getGeminiEmbeddingModel } from '@/lib/config'
+
+// Embedding generation via the official @google/genai SDK.
+//
+// gemini-embedding-001 with explicit outputDimensionality (default 768) keeps
+// the pgvector column and the match_embeddings RPC compatible. If a model
+// change ever returns more dimensions than requested, the Matryoshka-style
+// truncation below re-scales instead of failing the insert.
+
+let cachedClient: GoogleGenAI | null = null
+
+function client(): GoogleGenAI {
+  if (!cachedClient) {
+    cachedClient = new GoogleGenAI({ apiKey: getGeminiApiKey() })
+  }
+  return cachedClient
+}
 
 export interface EmbeddingResult {
   embedding: number[]
@@ -12,22 +28,31 @@ export async function generateTextEmbedding(text: string): Promise<EmbeddingResu
       return { embedding: [], error: 'Empty text provided' }
     }
 
-    const { embedding } = await embed({
-      model: geminiEmbedding,
-      value: text.trim()
+    const dimensions = getEmbeddingDimensions()
+    const response = await client().models.embedContent({
+      model: getGeminiEmbeddingModel(),
+      contents: text.trim(),
+      config: { outputDimensionality: dimensions },
     })
 
-    // Validate embedding dimensions
-    if (embedding.length !== EMBEDDING_CONFIG.dimensions) {
-      console.warn(`Unexpected embedding dimension: ${embedding.length}, expected: ${EMBEDDING_CONFIG.dimensions}`)
+    const values = response.embeddings?.[0]?.values ?? []
+    if (values.length === 0) {
+      return { embedding: [], error: 'Embedding model returned no values' }
     }
 
+    const embedding = coerceEmbeddingDimensions(values, dimensions)
+    if (!embedding) {
+      return {
+        embedding: [],
+        error: `Embedding dimension mismatch: got ${values.length}, expected ${dimensions}`,
+      }
+    }
     return { embedding }
   } catch (error) {
-    console.error('Text embedding error:', error)
+    console.error('Failed to generate text embedding:', error)
     return {
       embedding: [],
-      error: error instanceof Error ? error.message : 'Failed to generate embedding'
+      error: error instanceof Error ? error.message : 'Unknown embedding error',
     }
   }
 }
@@ -37,30 +62,24 @@ export async function generateMultimodalEmbedding(
   visualDescription: string,
   topics: string[] = []
 ): Promise<EmbeddingResult> {
-  try {
-    // Combine multimodal content into a single text representation
-    const combinedContent = [
-      `Transcript: ${transcriptText}`,
-      `Visual: ${visualDescription}`,
-      topics.length > 0 ? `Topics: ${topics.join(', ')}` : ''
-    ].filter(Boolean).join('\n\n')
-
-    return await generateTextEmbedding(combinedContent)
-  } catch (error) {
-    console.error('Multimodal embedding error:', error)
-    return {
-      embedding: [],
-      error: error instanceof Error ? error.message : 'Failed to generate multimodal embedding'
-    }
-  }
+  const combinedContent = [
+    `Transcript: ${transcriptText}`,
+    `Visual: ${visualDescription}`,
+    topics.length > 0 ? `Topics: ${topics.join(', ')}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  return generateTextEmbedding(combinedContent)
 }
 
-export async function generateChunkEmbeddings(chunks: Array<{
-  id: string
-  transcriptText: string
-  visualDescription?: string
-  topics?: string[]
-}>): Promise<Array<{
+export async function generateChunkEmbeddings(
+  chunks: Array<{
+    id: string
+    transcriptText: string
+    visualDescription?: string
+    topics?: string[]
+  }>
+): Promise<Array<{
   chunkId: string
   embedding: number[]
   contentType: 'transcript' | 'multimodal'
@@ -70,66 +89,70 @@ export async function generateChunkEmbeddings(chunks: Array<{
 
   for (const chunk of chunks) {
     try {
-      let embeddingResult: EmbeddingResult
+      const embeddingResult =
+        chunk.visualDescription && chunk.visualDescription.trim()
+          ? await generateMultimodalEmbedding(
+              chunk.transcriptText,
+              chunk.visualDescription,
+              chunk.topics
+            )
+          : await generateTextEmbedding(chunk.transcriptText)
 
-      if (chunk.visualDescription && chunk.visualDescription.trim()) {
-        // Generate multimodal embedding
-        embeddingResult = await generateMultimodalEmbedding(
-          chunk.transcriptText,
-          chunk.visualDescription,
-          chunk.topics
-        )
-        
-        results.push({
-          chunkId: chunk.id,
-          embedding: embeddingResult.embedding,
-          contentType: 'multimodal' as const,
-          error: embeddingResult.error
-        })
-      } else {
-        // Generate transcript-only embedding
-        embeddingResult = await generateTextEmbedding(chunk.transcriptText)
-        
-        results.push({
-          chunkId: chunk.id,
-          embedding: embeddingResult.embedding,
-          contentType: 'transcript' as const,
-          error: embeddingResult.error
-        })
-      }
+      results.push({
+        chunkId: chunk.id,
+        embedding: embeddingResult.embedding,
+        contentType: chunk.visualDescription && chunk.visualDescription.trim()
+          ? ('multimodal' as const)
+          : ('transcript' as const),
+        error: embeddingResult.error,
+      })
     } catch (error) {
       console.error(`Embedding error for chunk ${chunk.id}:`, error)
       results.push({
         chunkId: chunk.id,
         embedding: [],
         contentType: 'transcript' as const,
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: error instanceof Error ? error.message : 'Unknown error',
       })
     }
 
-    // Add small delay to avoid rate limiting
-    await new Promise(resolve => setTimeout(resolve, 100))
+    // Small delay to avoid rate limiting on batch jobs.
+    await new Promise((resolve) => setTimeout(resolve, 100))
   }
 
   return results
 }
 
 export function normalizeEmbedding(embedding: number[]): number[] {
-  const norm = Math.sqrt(embedding.reduce((sum, val) => sum + val * val, 0))
-  if (norm === 0) return embedding
-  return embedding.map(val => val / norm)
+  const magnitude = Math.sqrt(embedding.reduce((sum, val) => sum + val * val, 0))
+  if (magnitude === 0) return embedding
+  return embedding.map((val) => val / magnitude)
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length) {
-    throw new Error('Vectors must have the same length')
+    throw new Error(`Embedding dimensions mismatch: ${a.length} vs ${b.length}`)
   }
 
-  const dotProduct = a.reduce((sum, val, i) => sum + val * b[i], 0)
-  const normA = Math.sqrt(a.reduce((sum, val) => sum + val * val, 0))
-  const normB = Math.sqrt(b.reduce((sum, val) => sum + val * val, 0))
+  let dotProduct = 0
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i]
+  }
 
-  if (normA === 0 || normB === 0) return 0
-  
-  return dotProduct / (normA * normB)
-} 
+  const magnitudeA = Math.sqrt(a.reduce((sum, val) => sum + val * val, 0))
+  const magnitudeB = Math.sqrt(b.reduce((sum, val) => sum + val * val, 0))
+
+  if (magnitudeA === 0 || magnitudeB === 0) return 0
+  return dotProduct / (magnitudeA * magnitudeB)
+}
+
+// Returns null when values are too few; truncates + renormalizes when the
+// model ignored outputDimensionality (gemini-embedding-001 embeddings are
+// MRL-truncatable).
+export function coerceEmbeddingDimensions(values: number[], dimensions: number): number[] | null {
+  if (values.length === dimensions) return values
+  if (values.length > dimensions) {
+    return normalizeEmbedding(values.slice(0, dimensions))
+  }
+  return null
+}

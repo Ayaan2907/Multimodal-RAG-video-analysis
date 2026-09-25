@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 
 export function middleware(request: NextRequest) {
-  // Allow all requests to pass through - no auth required
+  // Pass-through middleware: route-level authorization is enforced per request
+  // by the API-key guard (lib/auth/request.ts, 401/403/429) — see spec §1.
   return NextResponse.next()
 }
 

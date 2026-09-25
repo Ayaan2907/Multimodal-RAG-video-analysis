@@ -1,12 +1,12 @@
 'use client'
 
 import { VideoWithDetails } from '@/lib/supabase/database'
-import { useRef, useImperativeHandle, forwardRef, useState, useEffect } from 'react'
-import { getVideoFileUrl } from '@/lib/supabase/storage'
-import { MediaController, MediaControlBar, MediaTimeDisplay, MediaTimeRange, MediaPlayButton, MediaMuteButton, MediaVolumeRange, MediaSeekBackwardButton, MediaSeekForwardButton, MediaFullscreenButton } from 'media-chrome/dist/react'
+import { useRef, useImperativeHandle, forwardRef, useState } from 'react'
 
 interface VideoPlayerProps {
   video: VideoWithDetails
+  /** Short-lived signed playback URL, resolved server-side (private buckets). */
+  playbackUrl?: string | null
   onTimeUpdate?: (time: number) => void
 }
 
@@ -14,22 +14,10 @@ export interface VideoPlayerRef {
   seekTo: (time: number) => void
 }
 
-export const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({ video, onTimeUpdate }, ref) => {
+export const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({ video, playbackUrl, onTimeUpdate }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [error, setError] = useState<string | null>(null)
-  const [videoUrl, setVideoUrl] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (video.source_type === 'upload' && video.file_path) {
-      getVideoFileUrl(video.file_path).then(url => {
-        console.log('Video URL:', url)
-        setVideoUrl(url)
-      }).catch(err => {
-        console.error('Error getting video URL:', err)
-        setError('Error loading video URL')
-      })
-    }
-  }, [video.source_type, video.file_path])
+  const videoUrl = playbackUrl ?? null
 
   useImperativeHandle(ref, () => ({
     seekTo: (time: number) => {
@@ -111,4 +99,6 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({ video
       <p className="text-muted-foreground">Video not available</p>
     </div>
   )
-}) 
+})
+
+VideoPlayer.displayName = 'VideoPlayer'
