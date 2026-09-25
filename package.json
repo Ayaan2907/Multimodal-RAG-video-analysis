@@ -27,6 +27,7 @@
     "assemblyai": "^4.12.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "fflate": "^0.8.3",
     "geist": "^1.4.2",
     "lucide-react": "^0.511.0",
     "media-chrome": "^4.19.2",

@@ -2,6 +2,8 @@ import { supabaseAdmin, getSupabaseAdmin } from './admin'
 
 export interface VideoRecord {
   id: string
+  // Owning org (API-key ingest); null for legacy pre-auth rows.
+  organization_id?: string | null
   title: string
   description?: string
   source_type: 'upload' | 'youtube'

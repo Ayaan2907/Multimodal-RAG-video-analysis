@@ -1,3 +1,5 @@
+import { DEFAULT_WEBHOOK_TOLERANCE_SECONDS } from '@/lib/webhooks/signature'
+
 // Central environment configuration.
 //
 // Rules enforced here (spec art_HKWx4t5y §1):
@@ -99,6 +101,18 @@ export function getEmbeddingDimensions(): number {
   const value = Number.parseInt(raw, 10)
   if (!Number.isFinite(value) || value <= 0) {
     throw new ConfigError(`EMBEDDING_DIMENSIONS must be a positive integer, got: ${raw}`)
+  }
+  return value
+}
+
+// ---- Webhooks (API v1) ----
+
+export function getWebhookToleranceSeconds(): number {
+  const raw = optional('WEBHOOK_TOLERANCE_SECONDS')
+  if (raw === undefined) return DEFAULT_WEBHOOK_TOLERANCE_SECONDS
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new ConfigError(`WEBHOOK_TOLERANCE_SECONDS must be a positive number, got: ${raw}`)
   }
   return value
 }
