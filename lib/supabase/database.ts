@@ -10,6 +10,9 @@ export interface VideoRecord {
   thumbnail_url?: string
   duration_seconds?: number
   file_size_bytes?: number
+  // Chain of custody: SHA-256 of the ingested content, computed at ingest.
+  content_sha256?: string | null
+  content_hash_scope?: 'file' | 'transcript' | null
   processing_status: 'uploading' | 'processing' | 'chunking' | 'transcribing' | 'embedding' | 'completed' | 'failed'
   processing_error?: string
   metadata?: Record<string, unknown>
@@ -72,6 +75,8 @@ export async function createVideoRecord(data: {
   duration_seconds?: number
   file_size_bytes?: number
   organization_id?: string | null
+  content_sha256?: string
+  content_hash_scope?: 'file' | 'transcript'
   metadata?: Record<string, unknown>
 }): Promise<{ data: VideoRecord | null; error: string | null }> {
   try {
@@ -281,6 +286,76 @@ export async function createEmbedding(data: {
   } catch (error) {
     console.error('Embedding insert exception:', error)
     return false
+  }
+}
+
+// Record the content hash computed at ingest (file bytes for uploads,
+// transcript text for remote sources such as YouTube).
+export async function setVideoContentHash(
+  videoId: string,
+  contentSha256: string,
+  scope: 'file' | 'transcript'
+): Promise<boolean> {
+  try {
+    const { error } = await supabaseAdmin
+      .from('videos')
+      .update({ content_sha256: contentSha256, content_hash_scope: scope })
+      .eq('id', videoId)
+
+    if (error) {
+      console.error('Content hash update error:', error)
+      return false
+    }
+    return true
+  } catch (error) {
+    console.error('Content hash update exception:', error)
+    return false
+  }
+}
+
+export interface ChunkProvenanceRow {
+  chunk_id: string
+  video_id: string
+  chunk_index: number
+  start_time_seconds: number
+  end_time_seconds: number
+  source_sha256?: string | null
+  embedding_model?: string | null
+}
+
+// One provenance row per chunk: (chunk, video, offset range, source hash,
+// embedding model version) — the chain-of-custody backbone (spec §3).
+export async function createChunkProvenance(rows: ChunkProvenanceRow[]): Promise<boolean> {
+  if (rows.length === 0) return true
+  try {
+    const { error } = await supabaseAdmin.from('chunk_provenance').insert(rows)
+    if (error) {
+      console.error('Chunk provenance insert error:', error)
+      return false
+    }
+    return true
+  } catch (error) {
+    console.error('Chunk provenance insert exception:', error)
+    return false
+  }
+}
+
+export async function getChunkProvenance(videoId: string): Promise<ChunkProvenanceRow[]> {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('chunk_provenance')
+      .select('chunk_id, video_id, chunk_index, start_time_seconds, end_time_seconds, source_sha256, embedding_model')
+      .eq('video_id', videoId)
+      .order('chunk_index', { ascending: true })
+
+    if (error) {
+      console.error('Chunk provenance fetch error:', error)
+      return []
+    }
+    return data ?? []
+  } catch (error) {
+    console.error('Chunk provenance fetch exception:', error)
+    return []
   }
 }
 
