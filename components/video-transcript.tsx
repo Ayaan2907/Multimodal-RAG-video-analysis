@@ -21,7 +21,7 @@ export function VideoTranscript({ transcript, segments = [], chunks = [], onTime
         <FileText className="h-12 w-12 mx-auto text-muted-foreground/50 mb-4" />
         <h3 className="text-lg font-medium mb-2">No Transcript Available</h3>
         <p className="text-sm text-muted-foreground">
-          This video doesn't have a transcript yet, or processing is still in progress.
+          This video doesn&apos;t have a transcript yet, or processing is still in progress.
         </p>
       </div>
     )

@@ -1,54 +1,45 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createVideoRecord } from '@/lib/supabase/database'
 import { extractVideoId, isValidYouTubeUrl, getVideoInfo } from '@/lib/video/youtube'
+import { authenticateRequest } from '@/lib/auth/request'
+import { authErrorResponse, jsonError } from '@/lib/api/http'
 
 export async function POST(request: NextRequest) {
   try {
+    // Auth first — unauthenticated requests never reach metadata fetches.
+    const auth = await authenticateRequest(request, 'ingest:write')
+    if (!auth.ok) return authErrorResponse(auth)
+
     const body = await request.json()
     const { url, title: customTitle, description: customDescription } = body
 
     // Validation
     if (!url?.trim()) {
-      return NextResponse.json(
-        { error: 'YouTube URL is required' },
-        { status: 400 }
-      )
+      return jsonError(400, 'missing_url', 'YouTube URL is required')
     }
 
     if (!isValidYouTubeUrl(url)) {
-      return NextResponse.json(
-        { error: 'Invalid YouTube URL' },
-        { status: 400 }
-      )
+      return jsonError(400, 'invalid_url', 'Invalid YouTube URL')
     }
 
     const videoId = extractVideoId(url)
     if (!videoId) {
-      return NextResponse.json(
-        { error: 'Could not extract video ID from URL' },
-        { status: 400 }
-      )
+      return jsonError(400, 'invalid_url', 'Could not extract video ID from URL')
     }
 
     // Get video information from YouTube
     const videoInfo = await getVideoInfo(videoId)
     if (!videoInfo) {
-      return NextResponse.json(
-        { error: 'Could not fetch video information. Video may be private or unavailable.' },
-        { status: 404 }
-      )
+      return jsonError(404, 'video_unavailable', 'Could not fetch video information. Video may be private or unavailable.')
     }
 
     // Check video duration (optional limit)
     const maxDuration = parseInt(process.env.MAX_VIDEO_DURATION_MINUTES || '30') * 60
     if (videoInfo.duration > maxDuration) {
-      return NextResponse.json(
-        { error: `Video duration (${Math.round(videoInfo.duration / 60)} minutes) exceeds maximum allowed (${maxDuration / 60} minutes)` },
-        { status: 400 }
-      )
+      return jsonError(400, 'video_too_long', `Video duration (${Math.round(videoInfo.duration / 60)} minutes) exceeds maximum allowed (${maxDuration / 60} minutes)`)
     }
 
-    // Create video record in database
+    // Create video record in database (org-scoped to the key's organization)
     const { data: videoRecord, error: dbError } = await createVideoRecord({
       title: customTitle?.trim() || videoInfo.title,
       description: customDescription?.trim() || videoInfo.description,
@@ -56,6 +47,7 @@ export async function POST(request: NextRequest) {
       source_url: url,
       thumbnail_url: videoInfo.thumbnailUrl,
       duration_seconds: videoInfo.duration,
+      organization_id: auth.context.organizationId,
       metadata: {
         videoId,
         channelTitle: videoInfo.channelTitle,
@@ -66,10 +58,7 @@ export async function POST(request: NextRequest) {
     })
 
     if (dbError || !videoRecord) {
-      return NextResponse.json(
-        { error: `Database error: ${dbError}` },
-        { status: 500 }
-      )
+      return jsonError(500, 'database_error', `Database error: ${dbError}`)
     }
 
     // Start background processing
@@ -91,10 +80,7 @@ export async function POST(request: NextRequest) {
 
   } catch (error) {
     console.error('YouTube extraction API error:', error)
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    )
+    return jsonError(500, 'internal_error', 'Internal server error')
   }
 }
 
@@ -103,18 +89,18 @@ async function processYouTubeVideoInBackground(videoId: string, youtubeId: strin
   try {
     // Import processing functions
     const { processYouTubeVideo } = await import('@/lib/video/processing')
-    
+
     // Trigger processing pipeline
     await processYouTubeVideo(videoId, youtubeId)
   } catch (error) {
     console.error('Background YouTube processing error:', error)
-    
+
     // Update video status to failed
     const { updateVideoStatus } = await import('@/lib/supabase/database')
     await updateVideoStatus(
-      videoId, 
-      'failed', 
+      videoId,
+      'failed',
       error instanceof Error ? error.message : 'YouTube processing failed'
     )
   }
-} 
+}

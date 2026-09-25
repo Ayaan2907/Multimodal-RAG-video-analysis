@@ -1,13 +1,8 @@
 import { spawn } from 'child_process'
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { createClient } from '@supabase/supabase-js'
+import { getSupabaseAdmin } from '@/lib/supabase/admin'
 import { AudioExtractionResult } from '../transcription/types'
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
 
 export async function extractAudioFromVideo(
   videoPath: string,
@@ -162,7 +157,7 @@ async function extractAudioWithFFmpeg(
 }
 
 async function getAudioDuration(audioPath: string): Promise<number> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const ffprobe = spawn('ffprobe', [
       '-v', 'quiet',
       '-print_format', 'json',
@@ -182,7 +177,7 @@ async function getAudioDuration(audioPath: string): Promise<number> {
           const info = JSON.parse(stdout)
           const duration = parseFloat(info.format.duration) || 0
           resolve(duration)
-        } catch (error) {
+        } catch {
           resolve(0) // Default to 0 if parsing fails
         }
       } else {
@@ -205,7 +200,7 @@ async function uploadAudioToStorage(
     const audioBuffer = await fs.readFile(audioPath)
     
     // Upload to Supabase Storage
-    const { data, error } = await supabase.storage
+    const { error } = await getSupabaseAdmin().storage
       .from('audio-files')
       .upload(fileName, audioBuffer, {
         contentType: 'audio/mpeg',
@@ -216,34 +211,32 @@ async function uploadAudioToStorage(
       throw new Error(`Storage upload failed: ${error.message}`)
     }
 
-    // Get public URL
-    const { data: urlData } = supabase.storage
+    // Buckets are private — hand out a short-lived signed URL, not a public one.
+    const { data: urlData, error: urlError } = await getSupabaseAdmin().storage
       .from('audio-files')
-      .getPublicUrl(fileName)
+      .createSignedUrl(fileName, 3600)
 
-    if (!urlData.publicUrl) {
-      throw new Error('Failed to get public URL for uploaded audio')
+    if (urlError || !urlData?.signedUrl) {
+      throw new Error('Failed to get signed URL for uploaded audio')
     }
 
-    console.log(`Audio uploaded to storage: ${urlData.publicUrl}`)
-    return urlData.publicUrl
+    return urlData.signedUrl
   } finally {
     // Cleanup local file
     try {
       await fs.unlink(audioPath)
-      console.log(`Cleaned up local audio file: ${audioPath}`)
     } catch (error) {
       console.warn(`Failed to cleanup audio file ${audioPath}:`, error)
     }
   }
 }
 
-// NEW: Function to cleanup audio file from storage after transcription
+// Function to cleanup audio file from storage after transcription
 export async function cleanupAudioFile(fileName: string): Promise<void> {
   try {
     console.log(`Cleaning up audio file from storage: ${fileName}`)
     
-    const { error } = await supabase.storage
+    const { error } = await getSupabaseAdmin().storage
       .from('audio-files')
       .remove([fileName])
 
@@ -271,4 +264,4 @@ export async function checkFFmpegAvailability(): Promise<boolean> {
       resolve(false)
     })
   })
-} 
+}

@@ -1,69 +1,55 @@
-import { TranscriptionProvider } from './types'
-import { AssemblyAIProvider } from './providers/assemblyai'
 import { GeminiProvider } from './providers/gemini'
+import { AssemblyAIProvider } from './providers/assemblyai'
+import { TranscriptionProvider } from './types'
+import { getAssemblyAiApiKey, getGeminiApiKey } from '@/lib/config'
 
-export class TranscriptionFactory {
-  private static providers = new Map<string, () => TranscriptionProvider>()
-  private static initialized = false
+// Provider registry. API keys come from env at call time (never module scope,
+// never hardcoded) so a missing provider config is a clean runtime error, not
+// a boot-time crash.
 
-  private static initialize() {
-    if (this.initialized) return
-
-    // Register Gemini provider (primary)
-    this.register('gemini', () => {
-      const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY
-      if (!apiKey) {
-        throw new Error('GOOGLE_GENERATIVE_AI_API_KEY environment variable is required for Gemini transcription')
-      }
-      return new GeminiProvider(apiKey)
-    })
-
-    // Register AssemblyAI provider (fallback)
-    this.register('assemblyai', () => {
-      const apiKey = process.env.ASSEMBLYAI_API_KEY
-      if (!apiKey) {
-        throw new Error('ASSEMBLYAI_API_KEY environment variable is required')
-      }
-      return new AssemblyAIProvider(apiKey)
-    })
-
-    // Future providers can be registered here
-    // this.register('openai-whisper', () => new OpenAIWhisperProvider(process.env.OPENAI_API_KEY!))
-    // this.register('google-speech', () => new GoogleSpeechProvider(process.env.GOOGLE_API_KEY!))
-
-    this.initialized = true
+export function getProvider(name: string): TranscriptionProvider | null {
+  switch (name.toLowerCase()) {
+    case 'gemini':
+      return new GeminiProvider(getGeminiApiKey())
+    case 'assemblyai':
+      return new AssemblyAIProvider(getAssemblyAiApiKey())
+    default:
+      return null
   }
+}
 
-  static register(name: string, factory: () => TranscriptionProvider) {
-    this.providers.set(name, factory)
-  }
-
-  static create(providerName?: string): TranscriptionProvider {
-    this.initialize()
-    
-    const name = providerName || process.env.TRANSCRIPTION_PROVIDER || 'gemini'
-    const factory = this.providers.get(name)
-    
-    if (!factory) {
-      const availableProviders = Array.from(this.providers.keys()).join(', ')
-      throw new Error(`Transcription provider '${name}' not found. Available providers: ${availableProviders}`)
-    }
-    
+export function getAllProviders(): TranscriptionProvider[] {
+  const providers: TranscriptionProvider[] = []
+  for (const name of ['gemini', 'assemblyai']) {
     try {
-      return factory()
+      const provider = getProvider(name)
+      if (provider) providers.push(provider)
     } catch (error) {
-      console.error(`Failed to create transcription provider '${name}':`, error)
-      throw error
+      // Skip providers whose credentials are not configured.
+      console.warn(`Provider ${name} unavailable:`, error instanceof Error ? error.message : error)
     }
   }
+  return providers
+}
 
-  static getAvailableProviders(): string[] {
-    this.initialize()
-    return Array.from(this.providers.keys())
-  }
+// Backwards-compatible surface used by lib/video/processing.ts.
+export const TranscriptionFactory = {
+  create(providerName?: string): TranscriptionProvider {
+    const name = providerName || process.env.TRANSCRIPTION_PROVIDER || 'gemini'
+    const provider = getProvider(name)
+    if (!provider) {
+      throw new Error(
+        `Transcription provider '${name}' not found. Available providers: gemini, assemblyai`
+      )
+    }
+    return provider
+  },
 
-  static isProviderAvailable(name: string): boolean {
-    this.initialize()
-    return this.providers.has(name)
-  }
-} 
+  getAvailableProviders(): string[] {
+    return ['gemini', 'assemblyai']
+  },
+
+  isProviderAvailable(name: string): boolean {
+    return ['gemini', 'assemblyai'].includes(name.toLowerCase())
+  },
+}

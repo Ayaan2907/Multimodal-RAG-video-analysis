@@ -9,12 +9,20 @@ import {
 } from '@/lib/supabase/database'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 import { getVideoTranscript } from './youtube'
-import { generateTopicBasedChunksWithBatching, analyzeVideoContent } from '@/lib/ai/gemini'
+import { generateTopicBasedChunksWithBatching } from '@/lib/ai/gemini'
 import { generateChunkEmbeddings, generateTextEmbedding, generateMultimodalEmbedding } from '@/lib/ai/embeddings'
 import { TranscriptionFactory } from '@/lib/transcription/factory'
 import { GeminiProvider, GeminiChunk } from '@/lib/transcription/providers/gemini'
-import { extractAudioFromVideo, checkFFmpegAvailability, cleanupAudioFile } from './audio-extraction'
-import { TranscriptSegment as TranscriptionSegment } from '@/lib/transcription/types'
+// Shape of a row inserted into the embeddings table (matches the migration schema).
+type EmbeddingInsertRow = {
+  video_id: string
+  chunk_id: string
+  content_type: 'transcript' | 'visual' | 'multimodal'
+  content_text: string
+  embedding: number[]
+  metadata?: Record<string, unknown>
+}
+import { TranscriptSegment as TranscriptionSegment, TranscriptionProvider } from '@/lib/transcription/types'
 
 const CHUNK_DURATION_SECONDS = parseInt(process.env.CHUNK_DURATION_SECONDS || '60')
 const EMBEDDING_BATCH_SIZE = 100;
@@ -149,7 +157,7 @@ async function processWithUnifiedGemini(
 async function processWithTraditionalApproach(
   videoId: string,
   audioFilePath: string,
-  provider: any
+  provider: TranscriptionProvider
 ): Promise<void> {
   try {
     // Traditional transcription
@@ -201,9 +209,9 @@ async function generateAndStoreEmbeddingsFromChunks(
   provider?: GeminiProvider
 ): Promise<void> {
   try {
-    let allEmbeddingsToCreate: any[] = []; 
+    let allEmbeddingsToCreate: EmbeddingInsertRow[] = []; 
 
-    const performBatchInsert = async (embeddingsToInsert: any[]) => {
+    const performBatchInsert = async (embeddingsToInsert: EmbeddingInsertRow[]) => {
       if (embeddingsToInsert.length === 0) return;
       console.log(`Attempting to batch insert ${embeddingsToInsert.length} embeddings into DB.`);
       const { error: insertError } = await supabaseAdmin.from('embeddings').insert(embeddingsToInsert);
@@ -498,9 +506,9 @@ async function generateAndStoreEmbeddings(
   chunkIds: string[]
 ): Promise<void> {
   try {
-    let allEmbeddingsToCreate: any[] = [];
+    let allEmbeddingsToCreate: EmbeddingInsertRow[] = [];
 
-    const performBatchInsert = async (embeddingsToInsert: any[]) => {
+    const performBatchInsert = async (embeddingsToInsert: EmbeddingInsertRow[]) => {
       if (embeddingsToInsert.length === 0) return;
       console.log(`Attempting to batch insert ${embeddingsToInsert.length} embeddings into DB (YouTube Flow).`);
       const { error: insertError } = await supabaseAdmin.from('embeddings').insert(embeddingsToInsert);
@@ -600,13 +608,16 @@ async function generateAndStoreEmbeddings(
   }
 }
 
-export async function getVideoStatus(videoId: string): Promise<{
+export async function getVideoStatus(
+  videoId: string,
+  organizationId?: string
+): Promise<{
   status: string
   error?: string
   progress?: number
 } | null> {
   try {
-    const video = await getVideoById(videoId)
+    const video = await getVideoById(videoId, organizationId)
     if (!video) {
       return null
     }

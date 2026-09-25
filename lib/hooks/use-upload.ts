@@ -1,4 +1,6 @@
 import { useState, useCallback } from 'react'
+import { authedFetch } from '@/lib/client/api-key'
+import { VideoRecord } from '@/lib/supabase/database'
 
 export interface UploadState {
   isUploading: boolean
@@ -7,7 +9,7 @@ export interface UploadState {
   status: 'idle' | 'uploading' | 'processing' | 'completed' | 'error'
   error: string | null
   videoId: string | null
-  videoData: any | null
+  videoData: VideoRecord | null
 }
 
 export interface UseUploadReturn extends UploadState {
@@ -113,7 +115,7 @@ export function useUpload(): UseUploadReturn {
         error: null
       }))
 
-      const response = await fetch('/api/youtube/extract', {
+      const response = await authedFetch('/api/youtube/extract', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -162,7 +164,7 @@ export function useUpload(): UseUploadReturn {
 
     const poll = async () => {
       try {
-        const response = await fetch(`/api/videos/${videoId}/status`)
+        const response = await authedFetch(`/api/videos/${videoId}/status`)
         
         if (!response.ok) {
           throw new Error('Failed to fetch video status')
