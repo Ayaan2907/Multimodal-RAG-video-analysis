@@ -1,0 +1,17 @@
+# Railway build definition (spec art_HKWx4t5y §7).
+#
+# Explicit rather than auto-detected so the image is deterministic:
+# - bun: installs from the committed bun.lock (same lockfile CI uses).
+# - nodejs_20: `next start` runs on Node; package.json engines requires >= 20.
+# - ffmpeg: audio extraction for upload ingest (lib/video/audio-extraction.ts).
+[phases.setup]
+nixpkgs = ["nodejs_20", "bun", "ffmpeg"]
+
+[phases.install]
+cmds = ["bun install --frozen-lockfile"]
+
+[phases.build]
+cmds = ["bun run build"]
+
+[start]
+cmd = "bun run start"
