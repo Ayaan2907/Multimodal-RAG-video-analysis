@@ -34,6 +34,16 @@ function slugify(text: string, fallback: string): string {
   return slug || fallback
 }
 
+/**
+ * YAML double-quoted scalar: titles carry colons, quotes, and backslashes
+ * that would otherwise break the frontmatter ("Q&A: Day 1" has a mapping
+ * colon inside a plain scalar). Escape \\ and " per YAML 1.2 double-quote
+ * rules; titles are single-line by contract (set at ingest).
+ */
+function yamlQuote(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
 function buildChunksJsonl(chunks: VideoChunk[]): string {
   const lines = chunks.map(chunk =>
     JSON.stringify({
@@ -65,7 +75,7 @@ export function buildSkillPackageFiles(input: SkillPackageInput, options: SkillP
 
   const skillMd = `---
 name: ${slugify(video.title, 'video-evidence')}
-description: ${description}
+description: ${yamlQuote(description)}
 ---
 
 # ${video.title}
