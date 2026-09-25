@@ -5,17 +5,18 @@ import { VideoWithDetails } from '@/lib/supabase/database'
 import { MessageCircle, Bot, User, Send, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils' // Assuming you have a cn utility for classnames
 import { authedFetch } from '@/lib/client/api-key'
+import { formatClockTimestamp } from '@/lib/export/transcript'
 
-// Interfaces for chat message structure
+// Wire shape from POST /api/chat — quotes are verbatim transcript spans.
 interface ChatSource {
-  chunkId: string
-  title: string | null
-  startTimeSeconds: number
-  endTimeSeconds: number
-  startTimeFormatted: string
-  endTimeFormatted: string
-  matchedOn: 'transcript' | 'visual' | 'multimodal'
+  chunk_id: string
+  video_id: string
+  start_seconds: number
+  end_seconds: number
+  quote: string
   similarity: number
+  title: string | null
+  matched_on: 'transcript' | 'visual' | 'multimodal'
 }
 
 interface ChatMessage {
@@ -158,19 +159,22 @@ export function ChatInterface({ video, onSourceClick }: ChatInterfaceProps) {
                   <div className="space-y-1.5">
                     {message.sources.map(source => (
                       <button
-                        key={source.chunkId}
-                        onClick={() => onSourceClick?.(source.startTimeSeconds)}
+                        key={source.chunk_id}
+                        onClick={() => onSourceClick?.(source.start_seconds)}
                         className="w-full text-left text-xs px-2 py-1.5 rounded-md hover:bg-muted/50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:opacity-50 disabled:cursor-not-allowed"
                         disabled={!onSourceClick}
-                        title={onSourceClick ? "Click to jump to this part of the video" : "Video interaction disabled"}
+                        title={onSourceClick ? "Click to jump to this part of the video and copy the permalink" : "Video interaction disabled"}
                       >
                         <div className="font-medium text-primary/80 truncate">
-                          {source.title || `Segment ${source.startTimeFormatted} - ${source.endTimeFormatted}`}
+                          {source.title || `Segment ${formatClockTimestamp(source.start_seconds)} - ${formatClockTimestamp(source.end_seconds)}`}
                         </div>
-                        <div className="flex items-center justify-between text-muted-foreground/80">
-                          <span>{source.startTimeFormatted} - {source.endTimeFormatted}</span>
+                        <blockquote className="mt-1 border-l-2 border-primary/40 pl-2 text-muted-foreground italic line-clamp-2">
+                          &ldquo;{source.quote}&rdquo;
+                        </blockquote>
+                        <div className="flex items-center justify-between text-muted-foreground/80 mt-1">
+                          <span>{formatClockTimestamp(source.start_seconds)} - {formatClockTimestamp(source.end_seconds)}</span>
                           <span className="capitalize text-[0.65rem] bg-muted/30 px-1.5 py-0.5 rounded-sm">
-                             {source.matchedOn} ({source.similarity.toFixed(2)})
+                             {source.matched_on} ({source.similarity.toFixed(2)})
                           </span>
                         </div>
                       </button>
