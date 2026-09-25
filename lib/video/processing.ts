@@ -18,6 +18,7 @@ import { getGeminiEmbeddingModel } from '@/lib/config'
 import { sha256Hex } from '@/lib/evidence/hash'
 import { TranscriptionFactory } from '@/lib/transcription/factory'
 import { GeminiProvider, GeminiChunk } from '@/lib/transcription/providers/gemini'
+import { notifyVideoCompleted } from '@/lib/webhooks/dispatch'
 // Shape of a row inserted into the embeddings table (matches the migration schema).
 type EmbeddingInsertRow = {
   video_id: string
@@ -31,6 +32,18 @@ import { TranscriptSegment as TranscriptionSegment, TranscriptionProvider } from
 
 const CHUNK_DURATION_SECONDS = parseInt(process.env.CHUNK_DURATION_SECONDS || '60')
 const EMBEDDING_BATCH_SIZE = 100;
+
+/** Fire-and-forget video.completed webhooks once the status flips (never blocks). */
+function notifyCompletion(video: VideoRecord, videoId: string): void {
+  if (!video.organization_id) return // legacy rows have no org → no endpoints
+  notifyVideoCompleted(video.organization_id, {
+    video_id: videoId,
+    title: video.title,
+    status: 'completed',
+    content_sha256: video.content_sha256 ?? null,
+    status_url: `/api/v1/videos/${videoId}/status`,
+  })
+}
 
 export async function processUploadedVideo(videoId: string, audioFilePath?: string): Promise<void> {
   await updateVideoStatus(videoId, 'processing')
@@ -170,6 +183,7 @@ async function processWithUnifiedGemini(
 
     // Mark as completed
     await updateVideoStatus(videoId, 'completed')
+    notifyCompletion(video, videoId)
 
   } catch (error) {
     console.error('Unified Gemini processing error:', error)
@@ -491,6 +505,7 @@ async function processTranscriptAndCreateChunks(
 
     // Mark as completed
     await updateVideoStatus(videoId, 'completed')
+    notifyCompletion(video, videoId)
 
   } catch (error) {
     console.error('Transcript processing error:', error)
