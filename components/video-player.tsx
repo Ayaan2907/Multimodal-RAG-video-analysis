@@ -7,6 +7,8 @@ interface VideoPlayerProps {
   video: VideoWithDetails
   /** Short-lived signed playback URL, resolved server-side (private buckets). */
   playbackUrl?: string | null
+  /** Deep-linked seek target in seconds (?t=612.4), applied once media is ready. */
+  initialTime?: number | null
   onTimeUpdate?: (time: number) => void
 }
 
@@ -14,15 +16,20 @@ export interface VideoPlayerRef {
   seekTo: (time: number) => void
 }
 
-export const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({ video, playbackUrl, onTimeUpdate }, ref) => {
+export const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({ video, playbackUrl, initialTime, onTimeUpdate }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [error, setError] = useState<string | null>(null)
   const videoUrl = playbackUrl ?? null
+  // Seeks before metadata loads throw (readyState 0) — queue until ready.
+  const pendingSeekRef = useRef<number | null>(initialTime ?? null)
 
   useImperativeHandle(ref, () => ({
     seekTo: (time: number) => {
-      if (videoRef.current) {
-        videoRef.current.currentTime = time
+      const element = videoRef.current
+      if (element && element.readyState >= 1) {
+        element.currentTime = time
+      } else {
+        pendingSeekRef.current = time
       }
     }
   }))
@@ -32,10 +39,13 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({ video
     const urlParams = new URLSearchParams(new URL(video.source_url).search)
     const videoId = urlParams.get('v') || video.source_url.split('/').pop()
 
+    // Deep links seek YouTube embeds via the native start parameter.
+    const startParam = initialTime != null ? `?start=${Math.floor(initialTime)}` : ''
+
     return (
       <div className="aspect-video w-full bg-black rounded-lg overflow-hidden">
         <iframe
-          src={`https://www.youtube.com/embed/${videoId}`}
+          src={`https://www.youtube.com/embed/${videoId}${startParam}`}
           title={video.title}
           allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
           allowFullScreen
@@ -65,6 +75,11 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({ video
               onLoadedData={() => {
                 console.log('Video loaded successfully')
                 setError(null)
+                // Apply a queued deep-link/citation seek once media is ready.
+                if (pendingSeekRef.current != null && videoRef.current) {
+                  videoRef.current.currentTime = pendingSeekRef.current
+                  pendingSeekRef.current = null
+                }
               }}
               onTimeUpdate={() => {
                 if (videoRef.current && onTimeUpdate) {

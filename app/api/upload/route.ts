@@ -4,6 +4,7 @@ import { createVideoRecord } from '@/lib/supabase/database'
 import { extractAudioFromVideoLocal, checkFFmpegAvailability } from '@/lib/video/audio-extraction'
 import { authenticateRequest } from '@/lib/auth/request'
 import { authErrorResponse, jsonError } from '@/lib/api/http'
+import { sha256Hex } from '@/lib/evidence/hash'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 
@@ -55,6 +56,9 @@ export async function POST(request: NextRequest) {
     const buffer = Buffer.from(arrayBuffer)
     await fs.writeFile(tempVideoPath, buffer)
 
+    // Chain of custody starts at ingest: hash the exact bytes we accept.
+    const contentSha256 = sha256Hex(buffer)
+
     // Extract audio to local file only (no upload, no cleanup)
     const audioResult = await extractAudioFromVideoLocal(tempVideoPath, 'temp')
 
@@ -74,6 +78,8 @@ export async function POST(request: NextRequest) {
       file_path: uploadResult.path,
       file_size_bytes: file.size,
       organization_id: auth.context.organizationId,
+      content_sha256: contentSha256,
+      content_hash_scope: 'file',
       metadata: {
         originalFileName: file.name,
         mimeType: file.type,

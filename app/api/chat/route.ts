@@ -7,6 +7,7 @@ import { authenticateRequest } from '@/lib/auth/request'
 import { authErrorResponse, jsonError } from '@/lib/api/http'
 import { getGroqChatModel, getMatchThreshold } from '@/lib/config'
 import { getVideoById } from '@/lib/supabase/database'
+import { buildChatSources, type ChatSourceMatch } from '@/lib/evidence/chat-sources'
 
 // Define the expected structure for items returned by match_embeddings
 interface MatchedEmbedding {
@@ -111,6 +112,39 @@ export async function POST(req: NextRequest) {
       return generateGenericResponse(message, videoId, 'No relevant segments found after processing.');
     }
 
+    // Evidence anchoring: fetch the stored transcript (content + segments) so
+    // every returned source quote is a verbatim span of the transcript.
+    const [{ data: transcriptRow }, { data: segmentRows }] = await Promise.all([
+      supabaseAdmin.from('transcripts').select('content').eq('video_id', videoId).maybeSingle<{ content: string | null }>(),
+      supabaseAdmin
+        .from('transcript_segments')
+        .select('text_content, start_time_seconds, end_time_seconds')
+        .eq('video_id', videoId)
+        .order('start_time_seconds', { ascending: true }),
+    ])
+
+    const sourceMatches: ChatSourceMatch[] = relevantChunksWithEmbeddings.map(item => ({
+      chunkId: item.chunk.id,
+      title: item.chunk.title,
+      startSeconds: item.chunk.start_time_seconds,
+      endSeconds: item.chunk.end_time_seconds,
+      contentType: item.matchedEmbedding.content_type,
+      similarity: item.matchedEmbedding.similarity,
+      matchedText: item.matchedEmbedding.content_text ?? null,
+      chunkTranscriptText: item.chunk.transcript_text ?? null,
+    }))
+
+    const sources = buildChatSources({
+      videoId,
+      matches: sourceMatches,
+      fullTranscript: transcriptRow?.content ?? '',
+      segments: (segmentRows ?? []).map(seg => ({
+        text: seg.text_content,
+        startSeconds: seg.start_time_seconds,
+        endSeconds: seg.end_time_seconds,
+      })),
+    })
+
     // Build the context with real newlines (the previous double-escaped "\\n"
     // strings collapsed the entire context into one literal-escape line).
     const contextParts = relevantChunksWithEmbeddings.map(item => {
@@ -142,19 +176,10 @@ export async function POST(req: NextRequest) {
       prompt: fullPrompt,
     });
 
-    // Step 1.7: Return LLM response & sources
+    // Step 1.7: Return LLM response & verbatim-anchored sources
     return NextResponse.json({
       answer: llmResponse.text,
-      sources: relevantChunksWithEmbeddings.map(item => ({
-        chunkId: item.chunk.id,
-        title: item.chunk.title,
-        startTimeSeconds: item.chunk.start_time_seconds,
-        endTimeSeconds: item.chunk.end_time_seconds,
-        startTimeFormatted: formatTime(item.chunk.start_time_seconds),
-        endTimeFormatted: formatTime(item.chunk.end_time_seconds),
-        matchedOn: item.matchedEmbedding.content_type,
-        similarity: item.matchedEmbedding.similarity,
-      }))
+      sources,
     });
 
   } catch (error) {

@@ -24,6 +24,12 @@ export default function VideoUpload() {
   const [dragActive, setDragActive] = useState(false)
 
   // File upload handlers
+  const handleFileSelect = useCallback((file: File) => {
+    if (!title.trim()) {
+      setTitle(file.name.replace(/\.[^/.]+$/, '')) // Remove extension
+    }
+  }, [title])
+
   const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     e.stopPropagation()
@@ -35,7 +41,7 @@ export default function VideoUpload() {
     if (videoFile) {
       handleFileSelect(videoFile)
     }
-  }, [])
+  }, [handleFileSelect])
 
   const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
@@ -48,12 +54,6 @@ export default function VideoUpload() {
     e.stopPropagation()
     setDragActive(false)
   }, [])
-
-  const handleFileSelect = useCallback((file: File) => {
-    if (!title.trim()) {
-      setTitle(file.name.replace(/\.[^/.]+$/, '')) // Remove extension
-    }
-  }, [title])
 
   const handleFileInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -83,7 +83,7 @@ export default function VideoUpload() {
 
   const handleViewVideo = useCallback(() => {
     if (upload.videoId) {
-      router.push(`/video/${upload.videoId}`)
+      router.push(`/videos/${upload.videoId}`)
     }
   }, [upload.videoId, router])
 

@@ -4,13 +4,18 @@ import {
   createTranscript, 
   createTranscriptSegments,
   createVideoChunk,
+  createChunkProvenance,
+  setVideoContentHash,
   getTranscriptTextForChunk,
-  VideoRecord
+  VideoRecord,
+  type ChunkProvenanceRow
 } from '@/lib/supabase/database'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 import { getVideoTranscript } from './youtube'
 import { generateTopicBasedChunksWithBatching } from '@/lib/ai/gemini'
 import { generateChunkEmbeddings, generateTextEmbedding, generateMultimodalEmbedding } from '@/lib/ai/embeddings'
+import { getGeminiEmbeddingModel } from '@/lib/config'
+import { sha256Hex } from '@/lib/evidence/hash'
 import { TranscriptionFactory } from '@/lib/transcription/factory'
 import { GeminiProvider, GeminiChunk } from '@/lib/transcription/providers/gemini'
 // Shape of a row inserted into the embeddings table (matches the migration schema).
@@ -117,8 +122,10 @@ async function processWithUnifiedGemini(
     // Create video chunks in database
     await updateVideoStatus(videoId, 'chunking')
     const chunkIds: string[] = []
+    const provenanceRows: ChunkProvenanceRow[] = []
     
-    for (const chunk of geminiChunks) {
+    for (let i = 0; i < geminiChunks.length; i++) {
+      const chunk = geminiChunks[i]
       const { id: chunkId, error: chunkError } = await createVideoChunk({
         video_id: videoId,
         title: chunk.title,
@@ -135,10 +142,26 @@ async function processWithUnifiedGemini(
       }
 
       chunkIds.push(chunkId)
+      provenanceRows.push({
+        chunk_id: chunkId,
+        video_id: videoId,
+        chunk_index: i + 1,
+        start_time_seconds: chunk.startTime,
+        end_time_seconds: chunk.endTime,
+        source_sha256: video.content_sha256 ?? null,
+        embedding_model: getGeminiEmbeddingModel(),
+      })
     }
 
     if (chunkIds.length === 0) {
       throw new Error('No chunks created successfully')
+    }
+
+    // Chain of custody: provenance must complete or the video cannot serve
+    // evidence — the manifest refuses incomplete custody (no silent fallback).
+    const provenanceRecorded = await createChunkProvenance(provenanceRows)
+    if (!provenanceRecorded) {
+      throw new Error('Failed to record chunk provenance (chain of custody incomplete)')
     }
 
     // Generate embeddings (both transcript and video)
@@ -352,6 +375,17 @@ async function processTranscriptAndCreateChunks(
       throw new Error(`Failed to create transcript: ${transcriptError}`)
     }
 
+    // Chain of custody: uploads carry a file hash from ingest; remote sources
+    // (YouTube) have no stored file, so hash the transcript we hold instead.
+    let sourceSha256: string | null = video.content_sha256 ?? null
+    if (!sourceSha256) {
+      sourceSha256 = sha256Hex(fullTranscript)
+      const hashRecorded = await setVideoContentHash(videoId, sourceSha256, 'transcript')
+      if (!hashRecorded) {
+        throw new Error('Failed to record transcript content hash (chain of custody incomplete)')
+      }
+    }
+
     // Create transcript segments
     const segments = transcriptSegments.map(seg => ({
       transcript_id: transcriptId,
@@ -411,7 +445,9 @@ async function processTranscriptAndCreateChunks(
 
     // Create video chunks in database (without transcript_text)
     const chunkIds: string[] = []
-    for (const chunk of chunks) {
+    const provenanceRows: ChunkProvenanceRow[] = []
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]
       const { id: chunkId, error: chunkError } = await createVideoChunk({
         video_id: videoId,
         title: chunk.title,
@@ -427,10 +463,26 @@ async function processTranscriptAndCreateChunks(
       }
 
       chunkIds.push(chunkId)
+      provenanceRows.push({
+        chunk_id: chunkId,
+        video_id: videoId,
+        chunk_index: i + 1,
+        start_time_seconds: chunk.start_time_seconds,
+        end_time_seconds: chunk.end_time_seconds,
+        source_sha256: sourceSha256,
+        embedding_model: getGeminiEmbeddingModel(),
+      })
     }
 
     if (chunkIds.length === 0) {
       throw new Error('No chunks created successfully')
+    }
+
+    // Chain of custody: provenance must complete or the video cannot serve
+    // evidence — the manifest refuses incomplete custody (no silent fallback).
+    const provenanceRecorded = await createChunkProvenance(provenanceRows)
+    if (!provenanceRecorded) {
+      throw new Error('Failed to record chunk provenance (chain of custody incomplete)')
     }
 
     // Generate embeddings (reconstruct transcript text when needed)
