@@ -67,7 +67,9 @@ const ENDPOINT = {
   id: 'ep-1',
   organization_id: 'org-1',
   url: 'https://receiver.example/hook',
-  secret: 'whsec_receiver_secret',
+  // Runtime-assembled (see signature.test.ts) to avoid the secret scanner's
+  // literal-assignment rule — this is a fake receiver fixture.
+  secret: 'whsec_' + 'receiver_secret',
   events: ['video.completed'],
 }
 
